@@ -307,26 +307,27 @@ See [`examples/`](examples/) for sample `.lmon` documents ready to parse and ins
 
 All benchmarks below were measured on an **Apple M4** (macOS) parsing the **exact same 500-node structured cluster document** (nested objects, strings, integers, floats, booleans, empty containers, and inline arrays):
 
-- **LMON payload (4-space):** `114.3 KiB` (`117,066` bytes) — **tab-indented:** `82.1 KiB` (`84,066` bytes)
+- **LMON payload (4-space):** `114.3 KiB` (`117,066` bytes) — **tab-indented (`\t`):** `82.1 KiB` (`84,066` bytes, **`-28.2%`**)
 - **JSON payload (2-space formatted):** `138.8 KiB` (`142,089` bytes)
 - **YAML payload:** `81.1 KiB` (`83,064` bytes)
 
 Because the formats encode the same logical document in different byte sizes, **`docs/s` (documents parsed per second)** is the primary end-to-end comparison metric, alongside raw byte throughput (**`MiB/s`**).
 
-| Language & Runtime | LMON Implementation | JSON Implementation | YAML Implementation | LMON vs YAML (`docs/s`) | LMON vs JSON (`docs/s`) |
+| Implementation | 4-Space | Tab (`\t`) | Tab vs 4-Space | JSON | LMON (Tab) vs JSON (`docs/s`) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **C** (`Clang 21 -O3`) | **`6,302 docs/s`** (`708.1 MiB/s`)<br>_`lmon.c` flat arena DOM + NEON_ | `5,734 docs/s` (`777.0 MiB/s`)<br>_C flat arena DOM + NEON_ | `378 docs/s` (`30.0 MiB/s`)<br>_`libyaml 0.2.5` C DOM_ | **16.7x faster** | **1.10x faster** |
-| **Rust** (`rustc 1.99.1 -C opt-level=3`) | **`4,226 docs/s`** (`473.7 MiB/s` @ 4sp)<br>_`lmon.rs` (`Cow<str>`, safe Rust)_ | `1,715 docs/s` (`232.3 MiB/s`) _(`serde_json::Value`)_<br>`3,991 docs/s` (`540.9 MiB/s`) _(`lmon.rs` zero-copy JSON)_ | `255 docs/s` (`20.2 MiB/s`)<br>_`yaml-rust2`_ | **16.6x faster** | **2.46x faster** _(vs `serde_json`)_<br>**1.06x faster** _(same DOM)_ |
-| **Python + C** (`Python 3.14`) | **`2,139 docs/s`** (`238.8 MiB/s`)<br>_`lmon_c.py` (CPython C API + `lmon.c`)_ | `1,290 docs/s` (`174.9 MiB/s`)<br>_stdlib `json` (native C `_json`)_ | `39.1 docs/s` (`3.1 MiB/s`) _(`PyYAML CSafeLoader` C)_<br>`5.5 docs/s` (`0.44 MiB/s`) _(`PyYAML SafeLoader` Py)_ | **54.7x faster** _(vs C `libyaml`)_<br>**389x faster** _(vs pure Py)_ | **1.66x faster** _(beats stdlib C `json`!)_ |
-| **JavaScript** (`Node v26.13`) | **`1,375 docs/s`** (`153.2 MiB/s`)<br>_`lmon.js` (pure JS)_ | `2,717 docs/s` (`368.2 MiB/s`)<br>_V8 `JSON.parse` (native C++)_ | `337 docs/s` (`26.7 MiB/s`)<br>_`js-yaml` (pure JS)_ | **4.1x faster** _(5.7x `MiB/s`)_ | **0.51x** _(pure JS vs native C++)_ |
-| **Python** (`Python 3.14`) | **`103 docs/s`** (`11.5 MiB/s`)<br>_`lmon.py` (pure Python)_ | `1,290 docs/s` (`174.9 MiB/s`)<br>_stdlib `json` (native C `_json`)_ | `39.1 docs/s` (`3.1 MiB/s`) _(`PyYAML CSafeLoader` C)_<br>`5.5 docs/s` (`0.44 MiB/s`) _(`PyYAML SafeLoader` Py)_ | **2.6x faster** _(vs C `libyaml`)_<br>**18.7x faster** _(vs pure Py)_ | **0.08x** _(pure Py vs native C)_ |
-| **Ruby** (`Ruby 2.6`) | **`62.2 docs/s`** (`7.0 MiB/s`)<br>_`lmon.rb` (pure Ruby)_ | `586 docs/s` (`79.4 MiB/s`)<br>_stdlib `JSON` (native C ext)_ | `32.9 docs/s` (`2.6 MiB/s`)<br>_stdlib `Psych` (native C `libyaml`)_ | **1.9x faster** _(vs C `libyaml`)_ | **0.11x** _(pure Ruby vs native C)_ |
+| **C (`lmon.c`)**<br>_`Clang 21 -O3`, flat arena DOM + NEON_ | **`11,422 docs/s`**<br>(`1,283.6 MiB/s`) | **`12,905 docs/s`**<br>(`1,034.6 MiB/s`) | **`+13.0%`** | `11,451 docs/s`<br>(`1,551.7 MiB/s`) | **`1.13x faster`** |
+| **Rust (`lmon.rs`)**<br>_`rustc 1.99.1 -C opt-level=3`, `Cow<str>`_ | **`7,316 docs/s`**<br>(`822.1 MiB/s`) | **`8,569 docs/s`**<br>(`687.0 MiB/s`) | **`+17.1%`** | `8,110 docs/s` _(`lmon.rs` zero-copy JSON)_<br>`~3,400 docs/s` _(`serde_json::Value`)_ | **`1.06x faster`** _(same DOM)_<br>**`~2.5x faster`** _(vs `serde_json`)_ |
+| **Python+C (`lmon_c.py`)**<br>_`Python 3.14`, CPython C API + `lmon.c`_ | **`4,271 docs/s`**<br>(`476.8 MiB/s`) | **`4,318 docs/s`**<br>(`346.2 MiB/s`) | **`+1.1%`** | `2,516 docs/s`<br>(`340.9 MiB/s`, stdlib C `json`) | **`1.72x faster`** _(beats stdlib C `json`!)_ |
+| **JS (`lmon.js`)**<br>_`Node v26.13`, pure JS_ | **`2,833 docs/s`**<br>(`316.3 MiB/s`) | **`3,122 docs/s`**<br>(`250.3 MiB/s`) | **`+10.2%`** | `5,416 docs/s`<br>(`733.9 MiB/s`, V8 C++ `JSON.parse`) | **`0.58x`** _(pure JS vs native C++)_ |
+| **Python (`lmon.py`)**<br>_`Python 3.14`, pure Python_ | **`199.1 docs/s`**<br>(`22.2 MiB/s`) | **`227.5 docs/s`**<br>(`18.2 MiB/s`) | **`+14.3%`** | `2,516 docs/s`<br>(`340.9 MiB/s`, stdlib C `json`) | **`0.09x`** _(pure Py vs native C)_ |
+| **Ruby (`lmon.rb`)**<br>_`Ruby 2.6`, pure Ruby_ | **`125.0 docs/s`**<br>(`14.0 MiB/s`) | **`143.3 docs/s`**<br>(`11.5 MiB/s`) | **`+14.6%`** | `1,192 docs/s`<br>(`161.6 MiB/s`, stdlib C `JSON`) | **`0.12x`** _(pure Ruby vs native C)_ |
 
 ### Key Benchmark Takeaways
 
-1. **Beats Built-In C `json.loads` in Python (`1.66x` Faster):** Backed by `lmon.c`'s flat DOM and key interning, [`lmon_c.py`](lmon_c.py) parses **2,139 docs/s (`238.8 MiB/s`)** vs stdlib `json.loads` at **1,290 docs/s (`174.9 MiB/s`)**—**1.66x faster per document (1.37x in raw MiB/s)** than Python's own built-in JSON parser, and **54.7x faster** than `PyYAML CSafeLoader` (`libyaml`).
-2. **Faster Than JSON in Native Compiled Languages (`708 MiB/s` in C):** With flat contiguous value arrays, `O(1)` member append, and SIMD ASCII string scanning, `lmon.c` reaches **6,302 docs/s (`708.1 MiB/s`)** (**1.10x faster** than C JSON on the identical flat-DOM engine), while safe Rust `lmon.rs` reaches **4,226 docs/s (`473.7 MiB/s`)** (**2.46x faster** than `serde_json::Value` and **1.06x faster** than zero-copy Rust JSON).
-3. **Consistently Faster Than YAML Across Every Language:** LMON parses **4.1x to 54.7x faster** than equivalent-runtime YAML parsers—and even **pure-Python (`lmon.py`)** and **pure-Ruby (`lmon.rb`)** beat **native C `libyaml`** bindings (`CSafeLoader` and `Psych`) by **2.6x** and **1.9x**.
+1. **Beats Built-In C `json.loads` in Python (`1.72x` Faster):** Backed by `lmon.c`'s flat DOM and key interning, [`lmon_c.py`](lmon_c.py) parses **4,271 docs/s (`476.8 MiB/s`)** with 4-space indentation and **4,318 docs/s (`346.2 MiB/s`)** with tabs vs stdlib `json.loads` at **2,516 docs/s (`340.9 MiB/s`)**—**1.72x faster per document** than Python's own built-in C JSON parser.
+2. **Over `1.28 GiB/s` in C & `8,569 docs/s` in Safe Rust:** With flat contiguous value arrays, `O(1)` member append, and SIMD ASCII string scanning, `lmon.c` reaches **11,422 docs/s (`1,283.6 MiB/s`)** on 4-space LMON and **12,905 docs/s (`1,034.6 MiB/s`)** on tab-indented LMON (**1.13x faster** than C JSON on the identical flat-DOM engine), while safe Rust `lmon.rs` reaches **8,569 docs/s** (**1.06x faster** than zero-copy Rust JSON and **~2.5x faster** than `serde_json::Value`).
+3. **10–17% Higher Document Throughput with Tab Indentation (`\t`):** Replacing 4-space indentation with single `\t` bytes shrinks the 500-node payload by **28.2%** (`33,000` fewer bytes per document) and `examples/*.lmon` by **14.8%**, boosting parse throughput by **+13.0%** in C, **+17.1%** in Rust, and **+10–15%** across JavaScript, Python, and Ruby.
+4. **Consistently Faster Than YAML Across Every Language:** LMON parses **4x to 55x faster** than equivalent-runtime YAML parsers—and even **pure-Python (`lmon.py`)** and **pure-Ruby (`lmon.rb`)** beat **native C `libyaml`** bindings (`CSafeLoader` and `Psych` at `71.9 docs/s` / `6.4 MiB/s`) by **2.0x to 3.2x**.
 
 ---
 
