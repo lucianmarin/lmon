@@ -1,0 +1,14 @@
+# Compiled binaries and build artifacts
+lmon_c
+lmon_rs
+*.o
+*.so
+*.dylib
+*.dSYM/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# OS
+.DS_Store

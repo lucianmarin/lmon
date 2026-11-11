@@ -1,0 +1,30 @@
+service: "lmon-gateway"
+version: 1
+production: true
+deprecation_date: null
+metadata: {}
+tags: ["fast", "strict", "pythonic"]
+empty_list: []
+
+limits:
+    max_connections: 1024
+    timeout_sec: 15.5
+    retry_backoff_ms: [100, 250, 500, 1000]
+
+upstreams:
+    -
+        host: "10.0.0.1"
+        port: 8080
+        weight: 3
+        healthy: true
+    -
+        host: "10.0.0.2"
+        port: 8081
+        weight: 1
+        healthy: false
+
+"http/headers":
+    "x-powered-by": "Lemon"
+    "content-type": "application/lmon; charset=utf-8"
+    "200": "OK"
+    "503": "Service Unavailable"

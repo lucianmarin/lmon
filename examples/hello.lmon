@@ -1,0 +1,12 @@
+name: "LMON"
+expansion: "Light Machine Object Notation"
+alternate_expansion: "Lucian Marin Object Notation"
+pronounced: "Lemon"
+version: 1
+pythonic: true
+curly_braces: false
+notes: null
+languages: ["Python", "Ruby", "JavaScript", "C", "Rust"]
+author:
+    name: "Lucian Marin"
+    year: 2026

@@ -1,0 +1,41 @@
+strings:
+    empty: ""
+    escapes: "quote: \" backslash: \\ slash: \/ tab:\t newline:\n cr:\r"
+    unicode_bmp: "Cafe \u00E9clair \u2014 100%"
+    surrogate_pair: "Lemon emoji: \uD83C\uDF4B"
+    json_like: "{\"not\": \"an object\"} and [1, 2, 3]"
+    colon_and_dash: "- item: not a block"
+
+numbers:
+    zero: 0
+    negative_zero: -0
+    int_max_safe: 9007199254740991
+    negative_int: -42
+    decimal: 3.141592653589793
+    exp_upper: 6.022E+23
+    exp_lower: -1.602e-19
+
+booleans_and_null:
+    yes_val: true
+    no_val: false
+    nothing: null
+    yaml_traps_stay_strings: ["NO", "off", "on", "yes", "1.20", "2026-11-11"]
+
+"special keys":
+    "": "empty key"
+    "true": true
+    "false": false
+    "null": null
+    "-leading-dash": 1
+    "0leading_digit": 2
+    "key with spaces": 3
+    "key:with:colons": 4
+    "line\nbreak": 5
+
+containers:
+    empty_obj: {}
+    empty_arr: []
+    array_of_empties:
+        - {}
+        - []
+        - [{}]
