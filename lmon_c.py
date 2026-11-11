@@ -40,6 +40,27 @@ from typing import Any, IO, List, Optional, Tuple
 __all__ = ["LMONDecodeError", "loads", "load", "dumps", "dump"]
 
 
+def _compute_line_col(doc: str, pos: int) -> Tuple[int, int]:
+    line = 1
+    col = 1
+    i = 0
+    end = min(pos, len(doc))
+    while i < end:
+        ch = doc[i]
+        if ch == "\n":
+            line += 1
+            col = 1
+        elif ch == "\r":
+            line += 1
+            col = 1
+            if i + 1 < end and doc[i + 1] == "\n":
+                i += 1
+        else:
+            col += 1
+        i += 1
+    return line, col
+
+
 class LMONDecodeError(ValueError):
     """Raised when an LMON document violates the LMON 1.0 specification."""
 
@@ -47,9 +68,7 @@ class LMONDecodeError(ValueError):
         # Convert UTF-8 byte offset from C parser to Python char index
         raw_prefix = doc.encode("utf-8")[:pos]
         char_pos = len(raw_prefix.decode("utf-8", errors="replace"))
-        line = doc.count("\n", 0, char_pos) + 1
-        last_nl = doc.rfind("\n", 0, char_pos)
-        col = char_pos + 1 if last_nl < 0 else char_pos - last_nl
+        line, col = _compute_line_col(doc, char_pos)
         super().__init__(f"{msg}: line {line} column {col} (char {char_pos})")
         self.msg = msg
         self.doc = doc
@@ -136,7 +155,7 @@ static PyObject *lmon_val_to_py(const LmonValue *v, KeyCache *kc) {
             PyObject *lst = PyList_New(n);
             if (!lst) return NULL;
             for (Py_ssize_t i = 0; i < n; i++) {
-                PyObject *item = lmon_val_to_py(v->u.arr.items[i], kc);
+                PyObject *item = lmon_val_to_py(&v->u.arr.items[i], kc);
                 if (!item) {
                     Py_DECREF(lst);
                     return NULL;
@@ -155,7 +174,7 @@ static PyObject *lmon_val_to_py(const LmonValue *v, KeyCache *kc) {
                     Py_DECREF(dct);
                     return NULL;
                 }
-                PyObject *val = lmon_val_to_py(v->u.obj.members[i].val, kc);
+                PyObject *val = lmon_val_to_py(&v->u.obj.members[i].val, kc);
                 if (!val) {
                     Py_DECREF(k);
                     Py_DECREF(dct);
@@ -343,7 +362,7 @@ static int py_try_write_inline(LmonBuf *b, PyObject *v, int depth) {
     return -1;
 }
 
-static int py_emit_block(LmonBuf *b, PyObject *v, size_t indent, int depth) {
+static int py_emit_block(LmonBuf *b, PyObject *v, size_t indent_level, int depth, const char *unit, size_t unit_len) {
     if (depth > MAX_DUMP_DEPTH) {
         PyErr_SetString(PyExc_RecursionError, "maximum recursion depth exceeded while encoding LMON");
         return -1;
@@ -364,7 +383,7 @@ static int py_emit_block(LmonBuf *b, PyObject *v, size_t indent, int depth) {
             if (!kptr) return -1;
             LmonStr ks = {kptr, (size_t)klen};
 
-            lmon_buf_indent(b, indent * 4);
+            lmon_buf_repeat_unit(b, unit, unit_len, indent_level);
             if (lmon_key_can_be_unquoted(ks)) {
                 lmon_buf_Append(b, ks.ptr, ks.len);
             } else {
@@ -382,7 +401,7 @@ static int py_emit_block(LmonBuf *b, PyObject *v, size_t indent, int depth) {
                 b->len = colon_pos;
                 b->data[b->len] = '\0';
                 lmon_buf_putc(b, '\n');
-                if (py_emit_block(b, val, indent + 1, depth + 1) < 0) return -1;
+                if (py_emit_block(b, val, indent_level + 1, depth + 1, unit, unit_len) < 0) return -1;
             }
         }
         return 0;
@@ -391,7 +410,7 @@ static int py_emit_block(LmonBuf *b, PyObject *v, size_t indent, int depth) {
         Py_ssize_t n = PyList_Check(v) ? PyList_GET_SIZE(v) : PyTuple_GET_SIZE(v);
         for (Py_ssize_t i = 0; i < n; i++) {
             PyObject *item = PyList_Check(v) ? PyList_GET_ITEM(v, i) : PyTuple_GET_ITEM(v, i);
-            lmon_buf_indent(b, indent * 4);
+            lmon_buf_repeat_unit(b, unit, unit_len, indent_level);
             lmon_buf_putc(b, '-');
 
             size_t dash_pos = b->len;
@@ -404,7 +423,7 @@ static int py_emit_block(LmonBuf *b, PyObject *v, size_t indent, int depth) {
                 b->len = dash_pos;
                 b->data[b->len] = '\0';
                 lmon_buf_putc(b, '\n');
-                if (py_emit_block(b, item, indent + 1, depth + 1) < 0) return -1;
+                if (py_emit_block(b, item, indent_level + 1, depth + 1, unit, unit_len) < 0) return -1;
             }
         }
         return 0;
@@ -416,7 +435,19 @@ static int py_emit_block(LmonBuf *b, PyObject *v, size_t indent, int depth) {
     return -1;
 }
 
-static PyObject *py_lmon_dumps(PyObject *Py_UNUSED(self), PyObject *arg) {
+static PyObject *py_lmon_dumps(PyObject *Py_UNUSED(self), PyObject *args) {
+    PyObject *arg = NULL;
+    const char *unit = "    ";
+    Py_ssize_t unit_slen = 4;
+    if (!PyArg_ParseTuple(args, "O|s#", &arg, &unit, &unit_slen)) {
+        return NULL;
+    }
+    size_t unit_len = 0;
+    if (!lmon_valid_indent_unit(unit, &unit_len)) {
+        PyErr_SetString(PyExc_ValueError, "indent must be 2, 4, 6, or 8 spaces, or '\\t'");
+        return NULL;
+    }
+
     LmonBuf b;
     if (!lmon_buf_init(&b, 512)) return PyErr_NoMemory();
 
@@ -428,7 +459,7 @@ static PyObject *py_lmon_dumps(PyObject *Py_UNUSED(self), PyObject *arg) {
     if (inline_ok == 1) {
         lmon_buf_putc(&b, '\n');
     } else {
-        if (py_emit_block(&b, arg, 0, 0) < 0) {
+        if (py_emit_block(&b, arg, 0, 0, unit, unit_len) < 0) {
             free(b.data);
             return NULL;
         }
@@ -456,7 +487,7 @@ static void lmon_ext_free(void *Py_UNUSED(mod)) {
 
 static PyMethodDef lmon_methods[] = {
     {"loads", py_lmon_loads, METH_O, "Parse an LMON string into Python objects using lmon.c."},
-    {"dumps", py_lmon_dumps, METH_O, "Serialize Python objects into canonical LMON using lmon.c."},
+    {"dumps", py_lmon_dumps, METH_VARARGS, "Serialize Python objects into canonical LMON using lmon.c."},
     {"_set_error_cls", py_lmon_set_error_cls, METH_O, "Register LMONDecodeError class."},
     {NULL, NULL, 0, NULL}
 };
@@ -548,6 +579,16 @@ def _load_or_build_extension():
 _ext = _load_or_build_extension()
 
 
+def _normalize_indent(indent: Any) -> str:
+    if isinstance(indent, int) and not isinstance(indent, bool):
+        if indent in (2, 4, 6, 8):
+            return " " * indent
+    elif isinstance(indent, str):
+        if indent == "\t" or (len(indent) in (2, 4, 6, 8) and indent.strip(" ") == ""):
+            return indent
+    raise ValueError("indent must be 2, 4, 6, or 8 (spaces) or '\\t'")
+
+
 def loads(text: str) -> Any:
     """Parse an LMON string into native Python objects using `lmon.c`."""
     return _ext.loads(text)
@@ -558,14 +599,14 @@ def load(fp: IO[str]) -> Any:
     return _ext.loads(fp.read())
 
 
-def dumps(obj: Any) -> str:
-    """Serialize a Python JSON-compatible value into canonical LMON 1.0 text using `lmon.c`."""
-    return _ext.dumps(obj)
+def dumps(obj: Any, indent: Any = 4) -> str:
+    """Serialize a Python JSON-compatible value into LMON text using `lmon.c`."""
+    return _ext.dumps(obj, _normalize_indent(indent))
 
 
-def dump(obj: Any, fp: IO[str]) -> None:
-    """Serialize a Python JSON-compatible value to a text stream as canonical LMON."""
-    fp.write(_ext.dumps(obj))
+def dump(obj: Any, fp: IO[str], indent: Any = 4) -> None:
+    """Serialize a Python JSON-compatible value to a text stream as LMON."""
+    fp.write(_ext.dumps(obj, _normalize_indent(indent)))
 
 
 # ---------------------------------------------------------------------------
@@ -607,27 +648,36 @@ def _run_tests() -> int:
     ]
 
     for name, expected in cases:
-        encoded = dumps(expected)
-        decoded = loads(encoded)
-        # Note: arbitrary-precision >64-bit ints decode as float in IEEE-754 C DOM
-        if name == "root_big_int":
-            if not isinstance(decoded, float):
-                print(f"FAIL [{name}]: expected float fallback for >64-bit int", file=sys.stderr)
+        for ind in (2, 4, 6, 8, "\t"):
+            encoded = dumps(expected, indent=ind)
+            decoded = loads(encoded)
+            if name == "root_big_int":
+                if not isinstance(decoded, float):
+                    print(f"FAIL [{name}]: expected float fallback for >64-bit int", file=sys.stderr)
+                    return 1
+                continue
+            if decoded != expected:
+                print(f"FAIL [{name} indent={ind!r}]: round-trip mismatch", file=sys.stderr)
                 return 1
-            continue
-        if decoded != expected:
-            print(f"FAIL [{name}]: round-trip mismatch\nGot: {decoded!r}\nExp: {expected!r}", file=sys.stderr)
-            return 1
 
     if loads('emoji: "\\uD83C\\uDF4B"\n') != {"emoji": "🍋"}:
         print("FAIL [surrogate_pair]", file=sys.stderr)
         return 1
 
+    if loads("a:\r\n\tb: 1\rc:\r\t-\r\n\t\tx: true\r\t- 2\r") != {"a": {"b": 1}, "c": [{"x": True}, 2]}:
+        print("FAIL [universal_newlines]", file=sys.stderr)
+        return 1
+
     invalid_inputs = [
         "",
         "   \n",
-        "  bad_indent: 1\n",
-        "\ttab: 1\n",
+        "   bad_indent_3: 1\n",
+        "a:\n bad_indent_1: 1\n",
+        "a:\n     bad_indent_5: 1\n",
+        "a:\n\t\ttwo_tabs_first: 1\n",
+        "a:\n  b: 1\n\tc: 2\n",
+        "a:\n\tb: 1\n  c: 2\n",
+        "a:\n \tb: 1\n",
         "dangling:\n",
         "dangling:\nstill_root: 1\n",
         'curly: {"a": 1}\n',
@@ -647,7 +697,10 @@ def _run_tests() -> int:
         except LMONDecodeError:
             pass
 
-    print(f"Python C-accelerated LMON (lmon_c.py): all {len(cases) + len(invalid_inputs) + 1} conformance tests passed.")
+    print(
+        f"Python C-accelerated LMON (lmon_c.py): all "
+        f"{len(cases) * 5 + len(invalid_inputs) + 2} conformance tests passed."
+    )
     return 0
 
 
@@ -701,16 +754,25 @@ def _run_bench(path: Optional[str]) -> int:
     return 0
 
 
+def _parse_indent_arg(val: str) -> Any:
+    if val in ("2", "4", "6", "8"):
+        return int(val)
+    if val in ("tab", "\\t", "\t"):
+        return "\t"
+    raise ValueError("--indent must be 2, 4, 6, 8, or tab")
+
+
 def _usage() -> str:
     return (
         "Usage: python3 lmon_c.py [options] <file.lmon | ->\n"
         "Options:\n"
-        "  -c, --compact    Output compact single-line JSON\n"
-        "  -l, --lmon       Output canonical LMON\n"
-        "  --from-json      Parse input as JSON and output canonical LMON\n"
-        "  --check          Validate LMON syntax only\n"
-        "  --test           Run conformance test suite\n"
-        "  --bench [file]   Run LMON (C ext) vs stdlib json benchmark\n"
+        "  -c, --compact          Output compact single-line JSON\n"
+        "  -l, --lmon             Output canonical LMON\n"
+        "  --indent <2|4|6|8|tab> Set LMON output indentation (default: 4)\n"
+        "  --from-json            Parse input as JSON and output LMON\n"
+        "  --check                Validate LMON syntax only\n"
+        "  --test                 Run conformance test suite\n"
+        "  --bench [file]         Run LMON (C ext) vs stdlib json benchmark\n"
     )
 
 
@@ -728,12 +790,26 @@ def main(argv: List[str]) -> int:
     out_lmon = False
     from_json = False
     check_only = False
+    indent_opt: Any = 4
     target: Optional[str] = None
 
-    for arg in argv:
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
         if arg in ("-c", "--compact"):
             compact = True
         elif arg in ("-l", "--lmon"):
+            out_lmon = True
+        elif arg == "--indent":
+            i += 1
+            if i >= len(argv):
+                sys.stderr.write(_usage())
+                return 2
+            try:
+                indent_opt = _parse_indent_arg(argv[i])
+            except ValueError as exc:
+                sys.stderr.write(f"lmon error: {exc}\n")
+                return 2
             out_lmon = True
         elif arg == "--from-json":
             from_json = True
@@ -745,6 +821,7 @@ def main(argv: List[str]) -> int:
             return 2
         else:
             target = arg
+        i += 1
 
     if target is None:
         sys.stderr.write(_usage())
@@ -754,7 +831,7 @@ def main(argv: List[str]) -> int:
         if target == "-":
             raw = sys.stdin.read()
         else:
-            with open(target, "r", encoding="utf-8") as f:
+            with open(target, "r", encoding="utf-8", newline="") as f:
                 raw = f.read()
             if target.endswith(".json"):
                 from_json = True
@@ -763,7 +840,7 @@ def main(argv: List[str]) -> int:
         if check_only:
             return 0
         if out_lmon:
-            sys.stdout.write(dumps(data))
+            sys.stdout.write(dumps(data, indent=indent_opt))
         elif compact:
             sys.stdout.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n")
         else:

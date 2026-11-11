@@ -26,10 +26,27 @@ module LMON
     attr_reader :lineno, :colno, :pos
 
     def initialize(message, doc, pos)
-      prefix = doc.byteslice(0, pos) || ""
-      @lineno = prefix.count("\n") + 1
-      last_nl = prefix.rindex("\n")
-      @colno = last_nl ? (prefix.length - last_nl) : (prefix.length + 1)
+        prefix = doc.byteslice(0, pos) || ""
+      line = 1
+      col = 1
+      i = 0
+      chars = prefix.chars
+      while i < chars.length
+        ch = chars[i]
+        if ch == "\n"
+          line += 1
+          col = 1
+        elsif ch == "\r"
+          line += 1
+          col = 1
+          i += 1 if i + 1 < chars.length && chars[i + 1] == "\n"
+        else
+          col += 1
+        end
+        i += 1
+      end
+      @lineno = line
+      @colno = col
       @pos = pos
       super("#{message}: line #{@lineno} column #{@colno} (byte #{pos})")
     end
@@ -64,6 +81,8 @@ module LMON
       @sc = StringScanner.new(@s)
       @line_indent = -2
       @line_start = 0
+      @indent_byte = nil
+      @indent_width = 0
     end
 
     def parse_document
@@ -125,32 +144,120 @@ module LMON
 
       while p < len
         line_begin = p
-        p += 1 while p < len && @s.getbyte(p) == 0x20
-        if p >= len
-          @sc.pos = p
-          @line_indent = -1
-          return -1
-        end
+        first = @s.getbyte(p)
 
-        b = @s.getbyte(p)
-        if b == 0x0A # \n
+        if first == 0x20 # ' '
+          p += 1 while p < len && @s.getbyte(p) == 0x20
+          if p >= len
+            @sc.pos = p
+            @line_indent = -1
+            return -1
+          end
+
+          b = @s.getbyte(p)
+          if b == 0x0A # \n
+            p += 1
+            next
+          elsif b == 0x0D # \r
+            p += (p + 1 < len && @s.getbyte(p + 1) == 0x0A) ? 2 : 1
+            next
+          elsif b == 0x09 # \t
+            q = p + 1
+            q += 1 while q < len && (@s.getbyte(q) == 0x20 || @s.getbyte(q) == 0x09)
+            if q >= len
+              @sc.pos = q
+              @line_indent = -1
+              return -1
+            end
+            qb = @s.getbyte(q)
+            if qb == 0x0A
+              p = q + 1
+              next
+            elsif qb == 0x0D
+              p = (q + 1 < len && @s.getbyte(q + 1) == 0x0A) ? (q + 2) : (q + 1)
+              next
+            end
+            error("mixed spaces and tabs in indentation", p)
+          end
+
+          count = p - line_begin
+          if @indent_byte.nil?
+            unless count == 2 || count == 4 || count == 6 || count == 8
+              error("indentation unit must be 2, 4, 6, or 8 spaces (or 1 tab)", line_begin)
+            end
+            @indent_byte = 0x20
+            @indent_width = count
+            level = 1
+          elsif @indent_byte != 0x20
+            error("inconsistent indentation: document uses tabs, got spaces", line_begin)
+          else
+            error("indentation must be a multiple of #{@indent_width} spaces", line_begin) if (count % @indent_width) != 0
+            level = count / @indent_width
+          end
+
+          @sc.pos = p
+          @line_start = line_begin
+          @line_indent = level
+          return level
+        elsif first == 0x09 # \t
+          p += 1 while p < len && @s.getbyte(p) == 0x09
+          if p >= len
+            @sc.pos = p
+            @line_indent = -1
+            return -1
+          end
+
+          b = @s.getbyte(p)
+          if b == 0x0A
+            p += 1
+            next
+          elsif b == 0x0D
+            p += (p + 1 < len && @s.getbyte(p + 1) == 0x0A) ? 2 : 1
+            next
+          elsif b == 0x20
+            q = p + 1
+            q += 1 while q < len && (@s.getbyte(q) == 0x20 || @s.getbyte(q) == 0x09)
+            if q >= len
+              @sc.pos = q
+              @line_indent = -1
+              return -1
+            end
+            qb = @s.getbyte(q)
+            if qb == 0x0A
+              p = q + 1
+              next
+            elsif qb == 0x0D
+              p = (q + 1 < len && @s.getbyte(q + 1) == 0x0A) ? (q + 2) : (q + 1)
+              next
+            end
+            error("mixed tabs and spaces in indentation", p)
+          end
+
+          count = p - line_begin
+          if @indent_byte.nil?
+            error("first indented block must start at 1 tab", line_begin) if count != 1
+            @indent_byte = 0x09
+            @indent_width = 1
+          elsif @indent_byte != 0x09
+            error("inconsistent indentation: document uses spaces, got tab", line_begin)
+          end
+
+          @sc.pos = p
+          @line_start = line_begin
+          @line_indent = count
+          return count
+        elsif first == 0x0A
           p += 1
           next
-        elsif b == 0x0D # \r
-          error("bare CR is not allowed", p) if p + 1 >= len || @s.getbyte(p + 1) != 0x0A
-          p += 2
+        elsif first == 0x0D
+          p += (p + 1 < len && @s.getbyte(p + 1) == 0x0A) ? 2 : 1
           next
-        elsif b == 0x09 # \t
-          error("tabs are not allowed for indentation", p)
         end
-
-        spaces = p - line_begin
-        error("indentation must be a multiple of 4 spaces", line_begin) if (spaces & 3) != 0
 
         @sc.pos = p
         @line_start = line_begin
-        @line_indent = spaces >> 2
-        return @line_indent
+        @line_indent = 0
+        return 0
       end
 
       @sc.pos = p
@@ -172,8 +279,7 @@ module LMON
         @sc.pos = p + 1
         @line_indent = -2
       elsif b == 0x0D
-        error("bare CR is not allowed", p) if p + 1 >= len || @s.getbyte(p + 1) != 0x0A
-        @sc.pos = p + 2
+        @sc.pos = (p + 1 < len && @s.getbyte(p + 1) == 0x0A) ? (p + 2) : (p + 1)
         @line_indent = -2
       elsif b == 0x09
         error("tabs are not allowed outside strings", p)
@@ -486,8 +592,18 @@ module LMON
     end
   end
 
-  def emit_block(val, indent, lines)
-    prefix = "    " * indent
+  def normalize_indent(indent)
+    if indent.is_a?(Integer) && [2, 4, 6, 8].include?(indent)
+      " " * indent
+    elsif indent.is_a?(String) && (indent == "\t" || ([2, 4, 6, 8].include?(indent.bytesize) && indent.delete(" ").empty?))
+      indent
+    else
+      raise ArgumentError, "indent must be 2, 4, 6, or 8 (spaces) or '\\t'"
+    end
+  end
+
+  def emit_block(val, depth, unit, lines)
+    prefix = unit * depth
     if val.is_a?(Hash)
       val.each do |k, v|
         fkey = format_key(k)
@@ -496,7 +612,7 @@ module LMON
           lines << "#{prefix}#{fkey}: #{inline}"
         else
           lines << "#{prefix}#{fkey}:"
-          emit_block(v, indent + 1, lines)
+          emit_block(v, depth + 1, unit, lines)
         end
       end
     elsif val.is_a?(Array)
@@ -506,7 +622,7 @@ module LMON
           lines << "#{prefix}- #{inline}"
         else
           lines << "#{prefix}-"
-          emit_block(item, indent + 1, lines)
+          emit_block(item, depth + 1, unit, lines)
         end
       end
     else
@@ -514,18 +630,19 @@ module LMON
     end
   end
 
-  def dumps(obj)
+  def dumps(obj, indent: 4)
+    unit = normalize_indent(indent)
     inline = try_format_inline(obj)
     return "#{inline}\n" if inline
 
     lines = []
-    emit_block(obj, 0, lines)
+    emit_block(obj, 0, unit, lines)
     "#{lines.join("\n")}\n"
   end
   alias generate dumps
 
-  def dump(obj, io)
-    io.write(dumps(obj))
+  def dump(obj, io, indent: 4)
+    io.write(dumps(obj, indent: indent))
   end
 end
 
@@ -533,12 +650,13 @@ if __FILE__ == $PROGRAM_NAME
   usage = <<~USAGE
     Usage: ruby lmon.rb [options] <file.lmon | ->
     Options:
-      -c, --compact    Output compact single-line JSON
-      -l, --lmon       Output canonical LMON
-      --from-json      Parse input as JSON and output canonical LMON
-      --check          Validate LMON syntax only
-      --test           Run conformance test suite
-      --bench [file]   Run parse benchmark
+      -c, --compact          Output compact single-line JSON
+      -l, --lmon             Output canonical LMON
+      --indent <2|4|6|8|tab> Set LMON output indentation (default: 4)
+      --from-json            Parse input as JSON and output LMON
+      --check                Validate LMON syntax only
+      --test                 Run conformance test suite
+      --bench [file]         Run parse benchmark
   USAGE
 
   if ARGV.empty? || ARGV.include?("-h") || ARGV.include?("--help")
@@ -579,11 +697,13 @@ if __FILE__ == $PROGRAM_NAME
     ]
 
     cases.each do |name, expected|
-      encoded = LMON.dumps(expected)
-      decoded = LMON.loads(encoded)
-      if decoded != expected
-        warn "FAIL [#{name}]: round-trip mismatch\nGot: #{decoded.inspect}\nExp: #{expected.inspect}"
-        exit 1
+      [2, 4, 6, 8, "\t"].each do |ind|
+        encoded = LMON.dumps(expected, indent: ind)
+        decoded = LMON.loads(encoded)
+        if decoded != expected
+          warn "FAIL [#{name} indent=#{ind.inspect}]: round-trip mismatch"
+          exit 1
+        end
       end
     end
 
@@ -592,11 +712,21 @@ if __FILE__ == $PROGRAM_NAME
       exit 1
     end
 
+    if LMON.loads("a:\r\n\tb: 1\rc:\r\t-\r\n\t\tx: true\r\t- 2\r") != { "a" => { "b" => 1 }, "c" => [{ "x" => true }, 2] }
+      warn "FAIL [universal_newlines]"
+      exit 1
+    end
+
     invalid = [
       "",
       "   \n",
-      "  bad_indent: 1\n",
-      "\ttab: 1\n",
+      "   bad_indent_3: 1\n",
+      "a:\n bad_indent_1: 1\n",
+      "a:\n     bad_indent_5: 1\n",
+      "a:\n\t\ttwo_tabs_first: 1\n",
+      "a:\n  b: 1\n\tc: 2\n",
+      "a:\n\tb: 1\n  c: 2\n",
+      "a:\n \tb: 1\n",
       "dangling:\n",
       "dangling:\nstill_root: 1\n",
       "curly: {\"a\": 1}\n",
@@ -618,7 +748,7 @@ if __FILE__ == $PROGRAM_NAME
       end
     end
 
-    puts "Ruby LMON: all #{cases.length + invalid.length + 1} conformance tests passed."
+    puts "Ruby LMON: all #{cases.length * 5 + invalid.length + 2} conformance tests passed."
     exit 0
   end
 
@@ -653,12 +783,27 @@ if __FILE__ == $PROGRAM_NAME
   out_lmon = false
   from_json = false
   check_only = false
+  indent_opt = 4
   target = nil
 
-  ARGV.each do |arg|
+  idx = 0
+  while idx < ARGV.length
+    arg = ARGV[idx]
     case arg
     when "-c", "--compact" then compact = true
     when "-l", "--lmon" then out_lmon = true
+    when "--indent"
+      idx += 1
+      val = ARGV[idx]
+      if %w[2 4 6 8].include?(val)
+        indent_opt = val.to_i
+      elsif ["tab", "\\t", "\t"].include?(val)
+        indent_opt = "\t"
+      else
+        warn "lmon error: --indent must be 2, 4, 6, 8, or tab"
+        exit 2
+      end
+      out_lmon = true
     when "--from-json"
       from_json = true
       out_lmon = true
@@ -670,6 +815,7 @@ if __FILE__ == $PROGRAM_NAME
       end
       target = arg
     end
+    idx += 1
   end
 
   if target.nil?
@@ -679,9 +825,9 @@ if __FILE__ == $PROGRAM_NAME
 
   begin
     if target == "-"
-      raw = $stdin.read
+      raw = $stdin.binmode.read.force_encoding("UTF-8")
     else
-      raw = File.read(target, encoding: "UTF-8")
+      raw = File.binread(target).force_encoding("UTF-8")
       from_json = true if target.end_with?(".json")
     end
 
@@ -689,7 +835,7 @@ if __FILE__ == $PROGRAM_NAME
     exit 0 if check_only
 
     if out_lmon
-      $stdout.write(LMON.dumps(data))
+      $stdout.write(LMON.dumps(data, indent: indent_opt))
     elsif compact
       puts JSON.generate(data)
     else

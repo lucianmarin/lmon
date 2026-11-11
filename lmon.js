@@ -41,9 +41,14 @@ class LMONParseError extends SyntaxError {
     let col = 1;
     const end = Math.min(pos, doc.length);
     for (let i = 0; i < end; i++) {
-      if (doc.charCodeAt(i) === 10) {
+      const c = doc.charCodeAt(i);
+      if (c === 10) {
         line++;
         col = 1;
+      } else if (c === 13) {
+        line++;
+        col = 1;
+        if (i + 1 < end && doc.charCodeAt(i + 1) === 10) i++;
       } else {
         col++;
       }
@@ -74,6 +79,9 @@ class Parser {
     this.pos = 0;
     this.lineIndent = -2;
     this.lineStart = 0;
+    this.indentCode = 0; // 0 = unlocked, 32 (' ') or 9 ('\t')
+    this.indentWidth = 0;
+    this.indentShift = 0; // 0, 1, 2, 3, or -1 for width 6
   }
 
   err(msg, at) {
@@ -89,39 +97,151 @@ class Parser {
 
     while (p < n) {
       const lineBegin = p;
-      while (p < n && s.charCodeAt(p) === 32) p++;
+      const first = s.charCodeAt(p);
 
-      if (p >= n) {
+      if (first === 32) {
+        while (p < n && s.charCodeAt(p) === 32) p++;
+        if (p >= n) {
+          this.pos = p;
+          this.lineIndent = -1;
+          return -1;
+        }
+
+        const c = s.charCodeAt(p);
+        if (c === 10) {
+          p++;
+          continue;
+        }
+        if (c === 13) {
+          p += p + 1 < n && s.charCodeAt(p + 1) === 10 ? 2 : 1;
+          continue;
+        }
+        if (c === 9) {
+          let q = p + 1;
+          while (q < n) {
+            const qc = s.charCodeAt(q);
+            if (qc !== 32 && qc !== 9) break;
+            q++;
+          }
+          if (q >= n) {
+            this.pos = q;
+            this.lineIndent = -1;
+            return -1;
+          }
+          const qc = s.charCodeAt(q);
+          if (qc === 10) {
+            p = q + 1;
+            continue;
+          }
+          if (qc === 13) {
+            p = q + 1 < n && s.charCodeAt(q + 1) === 10 ? q + 2 : q + 1;
+            continue;
+          }
+          this.err("mixed spaces and tabs in indentation", p);
+        }
+
+        const count = p - lineBegin;
+        let level;
+        if (this.indentCode === 0) {
+          if (count !== 2 && count !== 4 && count !== 6 && count !== 8) {
+            this.err("indentation unit must be 2, 4, 6, or 8 spaces (or 1 tab)", lineBegin);
+          }
+          this.indentCode = 32;
+          this.indentWidth = count;
+          this.indentShift = count === 2 ? 1 : count === 4 ? 2 : count === 8 ? 3 : -1;
+          level = 1;
+        } else if (this.indentCode !== 32) {
+          this.err("inconsistent indentation: document uses tabs, got spaces", lineBegin);
+        } else if (this.indentShift >= 0) {
+          if ((count & (this.indentWidth - 1)) !== 0) {
+            this.err(`indentation must be a multiple of ${this.indentWidth} spaces`, lineBegin);
+          }
+          level = count >> this.indentShift;
+        } else {
+          if (count % 6 !== 0) {
+            this.err("indentation must be a multiple of 6 spaces", lineBegin);
+          }
+          level = (count / 6) | 0;
+        }
+
         this.pos = p;
-        this.lineIndent = -1;
-        return -1;
+        this.lineStart = lineBegin;
+        this.lineIndent = level;
+        return level;
       }
 
-      const c = s.charCodeAt(p);
-      if (c === 10) {
+      if (first === 9) {
+        while (p < n && s.charCodeAt(p) === 9) p++;
+        if (p >= n) {
+          this.pos = p;
+          this.lineIndent = -1;
+          return -1;
+        }
+
+        const c = s.charCodeAt(p);
+        if (c === 10) {
+          p++;
+          continue;
+        }
+        if (c === 13) {
+          p += p + 1 < n && s.charCodeAt(p + 1) === 10 ? 2 : 1;
+          continue;
+        }
+        if (c === 32) {
+          let q = p + 1;
+          while (q < n) {
+            const qc = s.charCodeAt(q);
+            if (qc !== 32 && qc !== 9) break;
+            q++;
+          }
+          if (q >= n) {
+            this.pos = q;
+            this.lineIndent = -1;
+            return -1;
+          }
+          const qc = s.charCodeAt(q);
+          if (qc === 10) {
+            p = q + 1;
+            continue;
+          }
+          if (qc === 13) {
+            p = q + 1 < n && s.charCodeAt(q + 1) === 10 ? q + 2 : q + 1;
+            continue;
+          }
+          this.err("mixed tabs and spaces in indentation", p);
+        }
+
+        const count = p - lineBegin;
+        if (this.indentCode === 0) {
+          if (count !== 1) {
+            this.err("first indented block must start at 1 tab", lineBegin);
+          }
+          this.indentCode = 9;
+          this.indentWidth = 1;
+          this.indentShift = 0;
+        } else if (this.indentCode !== 9) {
+          this.err("inconsistent indentation: document uses spaces, got tab", lineBegin);
+        }
+
+        this.pos = p;
+        this.lineStart = lineBegin;
+        this.lineIndent = count;
+        return count;
+      }
+
+      if (first === 10) {
         p++;
         continue;
       }
-      if (c === 13) {
-        if (p + 1 >= n || s.charCodeAt(p + 1) !== 10) {
-          this.err("bare CR is not allowed", p);
-        }
-        p += 2;
+      if (first === 13) {
+        p += p + 1 < n && s.charCodeAt(p + 1) === 10 ? 2 : 1;
         continue;
-      }
-      if (c === 9) {
-        this.err("tabs are not allowed for indentation", p);
-      }
-
-      const spaces = p - lineBegin;
-      if ((spaces & 3) !== 0) {
-        this.err("indentation must be a multiple of 4 spaces", lineBegin);
       }
 
       this.pos = p;
       this.lineStart = lineBegin;
-      this.lineIndent = spaces >> 2;
-      return this.lineIndent;
+      this.lineIndent = 0;
+      return 0;
     }
 
     this.pos = p;
@@ -144,12 +264,9 @@ class Parser {
       return;
     }
     if (c === 13) {
-      if (p + 1 < this.n && s.charCodeAt(p + 1) === 10) {
-        this.pos = p + 2;
-        this.lineIndent = -2;
-        return;
-      }
-      this.err("bare CR is not allowed", p);
+      this.pos = p + 1 < this.n && s.charCodeAt(p + 1) === 10 ? p + 2 : p + 1;
+      this.lineIndent = -2;
+      return;
     }
     if (c === 9) this.err("tabs are not allowed outside strings", p);
     if (c === 32) this.err("trailing spaces are not allowed", p);
@@ -706,8 +823,25 @@ function tryFormatInline(val) {
   throw new TypeError(`Value of type ${t} is not LMON serializable`);
 }
 
-function emitBlock(val, indent, lines) {
-  const prefix = "    ".repeat(indent);
+function normalizeIndent(indent) {
+  if (indent === undefined) return "    ";
+  if (indent === 2 || indent === 4 || indent === 6 || indent === 8) {
+    return " ".repeat(indent);
+  }
+  if (
+    indent === "\t" ||
+    indent === "  " ||
+    indent === "    " ||
+    indent === "      " ||
+    indent === "        "
+  ) {
+    return indent;
+  }
+  throw new RangeError("indent must be 2, 4, 6, or 8 (spaces) or '\\t'");
+}
+
+function emitBlock(val, depth, unit, lines) {
+  const prefix = unit.repeat(depth);
   if (Array.isArray(val)) {
     for (let i = 0; i < val.length; i++) {
       const inline = tryFormatInline(val[i]);
@@ -715,7 +849,7 @@ function emitBlock(val, indent, lines) {
         lines.push(`${prefix}- ${inline}`);
       } else {
         lines.push(`${prefix}-`);
-        emitBlock(val[i], indent + 1, lines);
+        emitBlock(val[i], depth + 1, unit, lines);
       }
     }
   } else if (val !== null && typeof val === "object") {
@@ -729,7 +863,7 @@ function emitBlock(val, indent, lines) {
         lines.push(`${prefix}${fk}: ${inline}`);
       } else {
         lines.push(`${prefix}${fk}:`);
-        emitBlock(v, indent + 1, lines);
+        emitBlock(v, depth + 1, unit, lines);
       }
     }
   } else {
@@ -737,11 +871,12 @@ function emitBlock(val, indent, lines) {
   }
 }
 
-function stringify(value) {
+function stringify(value, indent = 4) {
+  const unit = normalizeIndent(indent);
   const inline = tryFormatInline(value);
   if (inline !== null) return `${inline}\n`;
   const lines = [];
-  emitBlock(value, 0, lines);
+  emitBlock(value, 0, unit, lines);
   return `${lines.join("\n")}\n`;
 }
 
@@ -768,12 +903,13 @@ if (typeof require !== "undefined" && require.main === module) {
   const usage =
     "Usage: node lmon.js [options] <file.lmon | ->\n" +
     "Options:\n" +
-    "  -c, --compact    Output compact single-line JSON\n" +
-    "  -l, --lmon       Output canonical LMON\n" +
-    "  --from-json      Parse input as JSON and output canonical LMON\n" +
-    "  --check          Validate LMON syntax only\n" +
-    "  --test           Run conformance test suite\n" +
-    "  --bench [file]   Run LMON vs native JSON parse benchmark\n";
+    "  -c, --compact          Output compact single-line JSON\n" +
+    "  -l, --lmon             Output canonical LMON\n" +
+    "  --indent <2|4|6|8|tab> Set LMON output indentation (default: 4)\n" +
+    "  --from-json            Parse input as JSON and output LMON\n" +
+    "  --check                Validate LMON syntax only\n" +
+    "  --test                 Run conformance test suite\n" +
+    "  --bench [file]         Run LMON vs native JSON parse benchmark\n";
 
   const argv = process.argv.slice(2);
   if (argv.length === 0 || argv.includes("-h") || argv.includes("--help")) {
@@ -815,18 +951,29 @@ if (typeof require !== "undefined" && require.main === module) {
     ];
 
     for (const [name, expected] of cases) {
-      const encoded = stringify(expected);
-      const decoded = parse(encoded);
-      assert.deepStrictEqual(decoded, expected, `Round-trip failed for ${name}`);
+      for (const ind of [2, 4, 6, 8, "\t"]) {
+        const encoded = stringify(expected, ind);
+        const decoded = parse(encoded);
+        assert.deepStrictEqual(decoded, expected, `Round-trip failed for ${name} (indent=${ind})`);
+      }
     }
 
     assert.deepStrictEqual(parse('emoji: "\\uD83C\\uDF4B"\n'), { emoji: "🍋" });
+    assert.deepStrictEqual(parse("a:\r\n\tb: 1\rc:\r\t-\r\n\t\tx: true\r\t- 2\r"), {
+      a: { b: 1 },
+      c: [{ x: true }, 2],
+    });
 
     const invalid = [
       "",
       "   \n",
-      "  bad_indent: 1\n",
-      "\ttab: 1\n",
+      "   bad_indent_3: 1\n",
+      "a:\n bad_indent_1: 1\n",
+      "a:\n     bad_indent_5: 1\n",
+      "a:\n\t\ttwo_tabs_first: 1\n",
+      "a:\n  b: 1\n\tc: 2\n",
+      "a:\n\tb: 1\n  c: 2\n",
+      "a:\n \tb: 1\n",
       "dangling:\n",
       "dangling:\nstill_root: 1\n",
       'curly: {"a": 1}\n',
@@ -853,7 +1000,7 @@ if (typeof require !== "undefined" && require.main === module) {
       }
     }
 
-    console.log(`JavaScript LMON: all ${cases.length + invalid.length + 1} conformance tests passed.`);
+    console.log(`JavaScript LMON: all ${cases.length * 5 + invalid.length + 2} conformance tests passed.`);
     process.exit(0);
   }
 
@@ -917,12 +1064,25 @@ if (typeof require !== "undefined" && require.main === module) {
   let outLmon = false;
   let fromJson = false;
   let checkOnly = false;
+  let indentOpt = 4;
   let target = null;
 
-  for (const arg of argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
     if (arg === "-c" || arg === "--compact") compact = true;
     else if (arg === "-l" || arg === "--lmon") outLmon = true;
-    else if (arg === "--from-json") {
+    else if (arg === "--indent") {
+      const val = argv[++i];
+      if (val === "2" || val === "4" || val === "6" || val === "8") {
+        indentOpt = Number(val);
+      } else if (val === "tab" || val === "\\t" || val === "\t") {
+        indentOpt = "\t";
+      } else {
+        process.stderr.write("lmon error: --indent must be 2, 4, 6, 8, or tab\n");
+        process.exit(2);
+      }
+      outLmon = true;
+    } else if (arg === "--from-json") {
       fromJson = true;
       outLmon = true;
     } else if (arg === "--check") checkOnly = true;
@@ -952,7 +1112,7 @@ if (typeof require !== "undefined" && require.main === module) {
     if (checkOnly) process.exit(0);
 
     if (outLmon) {
-      process.stdout.write(stringify(data));
+      process.stdout.write(stringify(data, indentOpt));
     } else if (compact) {
       process.stdout.write(`${JSON.stringify(data)}\n`);
     } else {

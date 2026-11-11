@@ -135,6 +135,9 @@ struct Parser<'a> {
     pos: usize,
     line_start: usize,
     line_indent: i32, // -2 = uncached, -1 = EOF, >= 0 = indent level
+    indent_char: u8,  // 0 = unlocked, b' ' or b'\t'
+    indent_width: usize,
+    indent_shift: i32, // 0, 1, 2, 3, or -1 for width 6
 }
 
 impl<'a> Parser<'a> {
@@ -145,6 +148,9 @@ impl<'a> Parser<'a> {
             pos: 0,
             line_start: 0,
             line_indent: -2,
+            indent_char: 0,
+            indent_width: 0,
+            indent_shift: 0,
         }
     }
 
@@ -152,14 +158,22 @@ impl<'a> Parser<'a> {
         let clamped = at.min(self.bytes.len());
         let mut line = 1usize;
         let mut col = 1usize;
-        for &b in &self.bytes[..clamped] {
+        let mut i = 0usize;
+        while i < clamped {
+            let b = self.bytes[i];
             if b == b'\n' {
                 line += 1;
                 col = 1;
+            } else if b == b'\r' {
+                line += 1;
+                col = 1;
+                if i + 1 < clamped && self.bytes[i + 1] == b'\n' {
+                    i += 1;
+                }
             } else if (b & 0xC0) != 0x80 {
-                // Count UTF-8 scalar values for column numbers
                 col += 1;
             }
+            i += 1;
         }
         Err(ParseError {
             message: msg.to_string(),
@@ -181,48 +195,177 @@ impl<'a> Parser<'a> {
 
         while p < len {
             let line_begin = p;
+            let first = bytes[p];
 
-            // Fast 4-byte stride for 4-space indentation blocks
-            while p + 4 <= len && &bytes[p..p + 4] == b"    " {
-                p += 4;
-            }
-            while p < len && bytes[p] == b' ' {
-                p += 1;
-            }
-
-            if p >= len {
-                self.pos = p;
-                self.line_indent = -1;
-                return Ok(-1);
-            }
-
-            match bytes[p] {
-                b'\n' => {
+            if first == b' ' {
+                while p + 8 <= len && &bytes[p..p + 8] == b"        " {
+                    p += 8;
+                }
+                while p + 4 <= len && &bytes[p..p + 4] == b"    " {
+                    p += 4;
+                }
+                while p < len && bytes[p] == b' ' {
                     p += 1;
-                    continue;
                 }
-                b'\r' => {
-                    if p + 1 >= len || bytes[p + 1] != b'\n' {
-                        return self.err("bare CR is not allowed", p);
+
+                if p >= len {
+                    self.pos = p;
+                    self.line_indent = -1;
+                    return Ok(-1);
+                }
+
+                match bytes[p] {
+                    b'\n' => {
+                        p += 1;
+                        continue;
                     }
-                    p += 2;
-                    continue;
+                    b'\r' => {
+                        p += if p + 1 < len && bytes[p + 1] == b'\n' { 2 } else { 1 };
+                        continue;
+                    }
+                    b'\t' => {
+                        let mut q = p + 1;
+                        while q < len && (bytes[q] == b' ' || bytes[q] == b'\t') {
+                            q += 1;
+                        }
+                        if q >= len {
+                            self.pos = q;
+                            self.line_indent = -1;
+                            return Ok(-1);
+                        }
+                        if bytes[q] == b'\n' {
+                            p = q + 1;
+                            continue;
+                        }
+                        if bytes[q] == b'\r' {
+                            p = if q + 1 < len && bytes[q + 1] == b'\n' { q + 2 } else { q + 1 };
+                            continue;
+                        }
+                        return self.err("mixed spaces and tabs in indentation", p);
+                    }
+                    _ => {}
                 }
-                b'\t' => {
-                    return self.err("tabs are not allowed for indentation", p);
-                }
-                _ => {}
+
+                let count = p - line_begin;
+                let level = if self.indent_char == 0 {
+                    if !matches!(count, 2 | 4 | 6 | 8) {
+                        return self.err(
+                            "indentation unit must be 2, 4, 6, or 8 spaces (or 1 tab)",
+                            line_begin,
+                        );
+                    }
+                    self.indent_char = b' ';
+                    self.indent_width = count;
+                    self.indent_shift = match count {
+                        2 => 1,
+                        4 => 2,
+                        8 => 3,
+                        _ => -1,
+                    };
+                    1
+                } else if self.indent_char != b' ' {
+                    return self.err(
+                        "inconsistent indentation: document uses tabs, got spaces",
+                        line_begin,
+                    );
+                } else if self.indent_shift >= 0 {
+                    if (count & (self.indent_width - 1)) != 0 {
+                        return self.err(
+                            "indentation is not a multiple of detected space width",
+                            line_begin,
+                        );
+                    }
+                    (count >> (self.indent_shift as usize)) as i32
+                } else {
+                    if count % 6 != 0 {
+                        return self.err("indentation is not a multiple of 6 spaces", line_begin);
+                    }
+                    (count / 6) as i32
+                };
+
+                self.pos = p;
+                self.line_start = line_begin;
+                self.line_indent = level;
+                return Ok(level);
             }
 
-            let spaces = p - line_begin;
-            if (spaces & 3) != 0 {
-                return self.err("indentation must be a multiple of 4 spaces", line_begin);
+            if first == b'\t' {
+                while p < len && bytes[p] == b'\t' {
+                    p += 1;
+                }
+
+                if p >= len {
+                    self.pos = p;
+                    self.line_indent = -1;
+                    return Ok(-1);
+                }
+
+                match bytes[p] {
+                    b'\n' => {
+                        p += 1;
+                        continue;
+                    }
+                    b'\r' => {
+                        p += if p + 1 < len && bytes[p + 1] == b'\n' { 2 } else { 1 };
+                        continue;
+                    }
+                    b' ' => {
+                        let mut q = p + 1;
+                        while q < len && (bytes[q] == b' ' || bytes[q] == b'\t') {
+                            q += 1;
+                        }
+                        if q >= len {
+                            self.pos = q;
+                            self.line_indent = -1;
+                            return Ok(-1);
+                        }
+                        if bytes[q] == b'\n' {
+                            p = q + 1;
+                            continue;
+                        }
+                        if bytes[q] == b'\r' {
+                            p = if q + 1 < len && bytes[q + 1] == b'\n' { q + 2 } else { q + 1 };
+                            continue;
+                        }
+                        return self.err("mixed tabs and spaces in indentation", p);
+                    }
+                    _ => {}
+                }
+
+                let count = p - line_begin;
+                if self.indent_char == 0 {
+                    if count != 1 {
+                        return self.err("first indented block must start at 1 tab", line_begin);
+                    }
+                    self.indent_char = b'\t';
+                    self.indent_width = 1;
+                    self.indent_shift = 0;
+                } else if self.indent_char != b'\t' {
+                    return self.err(
+                        "inconsistent indentation: document uses spaces, got tab",
+                        line_begin,
+                    );
+                }
+
+                self.pos = p;
+                self.line_start = line_begin;
+                self.line_indent = count as i32;
+                return Ok(count as i32);
+            }
+
+            if first == b'\n' {
+                p += 1;
+                continue;
+            }
+            if first == b'\r' {
+                p += if p + 1 < len && bytes[p + 1] == b'\n' { 2 } else { 1 };
+                continue;
             }
 
             self.pos = p;
             self.line_start = line_begin;
-            self.line_indent = (spaces >> 2) as i32;
-            return Ok(self.line_indent);
+            self.line_indent = 0;
+            return Ok(0);
         }
 
         self.pos = p;
@@ -249,13 +392,13 @@ impl<'a> Parser<'a> {
                 Ok(())
             }
             b'\r' => {
-                if p + 1 < bytes.len() && bytes[p + 1] == b'\n' {
-                    self.pos = p + 2;
-                    self.line_indent = -2;
-                    Ok(())
+                self.pos = if p + 1 < bytes.len() && bytes[p + 1] == b'\n' {
+                    p + 2
                 } else {
-                    self.err("bare CR is not allowed", p)
-                }
+                    p + 1
+                };
+                self.line_indent = -2;
+                Ok(())
             }
             b'\t' => self.err("tabs are not allowed outside strings", p),
             b' ' => self.err("trailing spaces are not allowed", p),
@@ -673,11 +816,7 @@ impl<'a> Parser<'a> {
                 self.parse_nested_block(expected_indent + 1)?
             };
 
-            if let Some(existing) = members.iter_mut().find(|(k, _)| k.as_ref() == key.as_ref()) {
-                existing.1 = val;
-            } else {
-                members.push((key, val));
-            }
+            members.push((key, val)); // O(1) flat-DOM append
         }
 
         Ok(Value::Object(members))
@@ -803,11 +942,7 @@ impl<'a> Parser<'a> {
                     }
                     self.pos += 1;
                     let v = self.parse_json_value()?;
-                    if let Some(existing) = members.iter_mut().find(|(ek, _)| ek.as_ref() == k.as_ref()) {
-                        existing.1 = v;
-                    } else {
-                        members.push((k, v));
-                    }
+                    members.push((k, v)); // O(1) flat-DOM append
                     self.skip_json_ws();
                     if self.pos >= self.bytes.len() {
                         return self.err("unterminated JSON object", self.pos);
@@ -990,8 +1125,18 @@ fn try_write_inline(out: &mut String, v: &Value<'_>) -> Result<bool, String> {
     }
 }
 
-fn emit_block(out: &mut String, v: &Value<'_>, indent: usize) -> Result<(), String> {
-    let pad = "    ".repeat(indent);
+fn validate_indent_unit(unit: &str) -> Result<(), String> {
+    if unit == "\t"
+        || ((matches!(unit.len(), 2 | 4 | 6 | 8)) && unit.bytes().all(|b| b == b' '))
+    {
+        Ok(())
+    } else {
+        Err("indent must be 2, 4, 6, or 8 spaces, or '\\t'".to_string())
+    }
+}
+
+fn emit_block(out: &mut String, v: &Value<'_>, depth: usize, unit: &str) -> Result<(), String> {
+    let pad = unit.repeat(depth);
     match v {
         Value::Object(members) => {
             for (k, val) in members {
@@ -1009,7 +1154,7 @@ fn emit_block(out: &mut String, v: &Value<'_>, indent: usize) -> Result<(), Stri
                 } else {
                     out.truncate(colon_pos);
                     out.push('\n');
-                    emit_block(out, val, indent + 1)?;
+                    emit_block(out, val, depth + 1, unit)?;
                 }
             }
             Ok(())
@@ -1025,7 +1170,7 @@ fn emit_block(out: &mut String, v: &Value<'_>, indent: usize) -> Result<(), Stri
                 } else {
                     out.truncate(dash_pos);
                     out.push('\n');
-                    emit_block(out, item, indent + 1)?;
+                    emit_block(out, item, depth + 1, unit)?;
                 }
             }
             Ok(())
@@ -1034,14 +1179,19 @@ fn emit_block(out: &mut String, v: &Value<'_>, indent: usize) -> Result<(), Stri
     }
 }
 
-pub fn to_lmon(v: &Value<'_>) -> Result<String, String> {
+pub fn to_lmon_with_indent(v: &Value<'_>, indent_unit: &str) -> Result<String, String> {
+    validate_indent_unit(indent_unit)?;
     let mut out = String::with_capacity(256);
     if try_write_inline(&mut out, v)? {
         out.push('\n');
     } else {
-        emit_block(&mut out, v, 0)?;
+        emit_block(&mut out, v, 0, indent_unit)?;
     }
     Ok(out)
+}
+
+pub fn to_lmon(v: &Value<'_>) -> Result<String, String> {
+    to_lmon_with_indent(v, "    ")
 }
 
 fn write_json_rec(out: &mut String, v: &Value<'_>, pretty: bool, depth: usize) -> Result<(), String> {
@@ -1140,6 +1290,7 @@ fn run_tests() -> i32 {
          \"-dash\":\"dash-key\",\"with space\":\"quoted\\nline\\t\\uD83C\\uDF4B\"}",
     ];
 
+    let indents = ["  ", "    ", "      ", "        ", "\t"];
     for (idx, jc) in json_cases.iter().enumerate() {
         let v1 = match parse_json(jc) {
             Ok(v) => v,
@@ -1148,31 +1299,47 @@ fn run_tests() -> i32 {
                 return 1;
             }
         };
-        let lmon_txt = match to_lmon(&v1) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("FAIL [case {idx} to_lmon]: {e}");
+        for unit in &indents {
+            let lmon_txt = match to_lmon_with_indent(&v1, unit) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("FAIL [case {idx} to_lmon]: {e}");
+                    return 1;
+                }
+            };
+            let v2 = match parse(&lmon_txt) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("FAIL [case {idx} lmon parse]: {e}\n{lmon_txt}");
+                    return 1;
+                }
+            };
+            if v1 != v2 {
+                eprintln!("FAIL [case {idx} round-trip mismatch]:\nGot: {v2:?}\nExp: {v1:?}");
                 return 1;
             }
-        };
-        let v2 = match parse(&lmon_txt) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("FAIL [case {idx} lmon parse]: {e}\n{lmon_txt}");
-                return 1;
-            }
-        };
-        if v1 != v2 {
-            eprintln!("FAIL [case {idx} round-trip mismatch]:\nGot: {v2:?}\nExp: {v1:?}");
-            return 1;
         }
+    }
+
+    // Universal newlines (\r\n, \r, \n) + tab indentation test
+    let univ = parse("a:\r\n\tb: 1\rc:\r\t-\r\n\t\tx: true\r\t- 2\r").expect("universal newlines");
+    let univ_exp = parse_json("{\"a\":{\"b\":1},\"c\":[{\"x\":true},2]}").unwrap();
+    if univ != univ_exp {
+        eprintln!("FAIL [universal_newlines]");
+        return 1;
     }
 
     let invalid_cases = [
         "",
         "   \n",
-        "  bad_indent: 1\n",
-        "\ttab: 1\n",
+        "   bad_indent_3: 1\n",
+        "a:\n bad_indent_1: 1\n",
+        "a:\n     bad_indent_5: 1\n",
+        "a:\n          bad_indent_10: 1\n",
+        "a:\n\t\ttwo_tabs_first: 1\n",
+        "a:\n  b: 1\n\tc: 2\n",
+        "a:\n\tb: 1\n  c: 2\n",
+        "a:\n \tb: 1\n",
         "dangling:\n",
         "dangling:\nstill_root: 1\n",
         "curly: {\"a\": 1}\n",
@@ -1194,7 +1361,7 @@ fn run_tests() -> i32 {
 
     println!(
         "Rust LMON: all {} conformance tests passed.",
-        json_cases.len() + invalid_cases.len()
+        json_cases.len() * indents.len() + 1 + invalid_cases.len()
     );
     0
 }
@@ -1228,10 +1395,15 @@ fn run_bench(path: Option<&str>) -> i32 {
             return 1;
         }
     };
+    let tab_sample = to_lmon_with_indent(&parsed, "\t").unwrap();
     let json_sample = to_json(&parsed, true).unwrap();
 
     let kb = (sample.len() as f64) / 1024.0;
-    let iterations = ((100_000.0 / kb.max(1.0)) as usize).max(50);
+    let iterations = ((150_000.0 / kb.max(1.0)) as usize).max(100);
+
+    for _ in 0..10 {
+        std::hint::black_box(parse(&sample).unwrap());
+    }
 
     let t0 = Instant::now();
     for _ in 0..iterations {
@@ -1239,6 +1411,13 @@ fn run_bench(path: Option<&str>) -> i32 {
         std::hint::black_box(v);
     }
     let lmon_sec = t0.elapsed().as_secs_f64();
+
+    let t_tab = Instant::now();
+    for _ in 0..iterations {
+        let v = parse(&tab_sample).unwrap();
+        std::hint::black_box(v);
+    }
+    let tab_sec = t_tab.elapsed().as_secs_f64();
 
     let t1 = Instant::now();
     for _ in 0..iterations {
@@ -1248,31 +1427,59 @@ fn run_bench(path: Option<&str>) -> i32 {
     let json_sec = t1.elapsed().as_secs_f64();
 
     let lmon_mbs = (sample.len() * iterations) as f64 / (1024.0 * 1024.0 * lmon_sec);
+    let tab_mbs = (tab_sample.len() * iterations) as f64 / (1024.0 * 1024.0 * tab_sec);
     let json_mbs = (json_sample.len() * iterations) as f64 / (1024.0 * 1024.0 * json_sec);
     println!("Rust LMON benchmark ({iterations} iterations):");
-    println!("  LMON: {:.1} KiB/doc -> {:.3}s ({:.1} MiB/s)", kb, lmon_sec, lmon_mbs);
     println!(
-        "  JSON: {:.1} KiB/doc -> {:.3}s ({:.1} MiB/s)",
+        "  LMON (4-space): {:5.1} KiB/doc -> {:.3}s ({:5.1} MiB/s, {:5.0} docs/s)",
+        kb,
+        lmon_sec,
+        lmon_mbs,
+        (iterations as f64) / lmon_sec
+    );
+    println!(
+        "  LMON (tab):     {:5.1} KiB/doc -> {:.3}s ({:5.1} MiB/s, {:5.0} docs/s)",
+        tab_sample.len() as f64 / 1024.0,
+        tab_sec,
+        tab_mbs,
+        (iterations as f64) / tab_sec
+    );
+    println!(
+        "  JSON (pretty):  {:5.1} KiB/doc -> {:.3}s ({:5.1} MiB/s, {:5.0} docs/s)",
         json_sample.len() as f64 / 1024.0,
         json_sec,
-        json_mbs
+        json_mbs,
+        (iterations as f64) / json_sec
     );
     println!(
-        "  Result: LMON parsed {:.2}x faster per document than equivalent JSON.",
-        json_sec / lmon_sec
+        "  Result: LMON parsed {:.2}x (4-space) / {:.2}x (tab) faster per document than JSON.",
+        json_sec / lmon_sec,
+        json_sec / tab_sec
     );
     0
+}
+
+fn parse_indent_arg(s: &str) -> Option<&'static str> {
+    match s {
+        "2" => Some("  "),
+        "4" => Some("    "),
+        "6" => Some("      "),
+        "8" => Some("        "),
+        "tab" | "\\t" | "\t" => Some("\t"),
+        _ => None,
+    }
 }
 
 fn usage() -> &'static str {
     "Usage: lmon_rs [options] <file.lmon | ->\n\
      Options:\n\
-     \x20 -c, --compact    Output compact single-line JSON\n\
-     \x20 -l, --lmon       Output canonical LMON\n\
-     \x20 --from-json      Parse input as JSON and output canonical LMON\n\
-     \x20 --check          Validate LMON syntax only\n\
-     \x20 --test           Run conformance test suite\n\
-     \x20 --bench [file]   Run LMON vs JSON parse benchmark\n"
+     \x20 -c, --compact          Output compact single-line JSON\n\
+     \x20 -l, --lmon             Output canonical LMON\n\
+     \x20 --indent <2|4|6|8|tab> Set LMON output indentation (default: 4)\n\
+     \x20 --from-json            Parse input as JSON and output LMON\n\
+     \x20 --check                Validate LMON syntax only\n\
+     \x20 --test                 Run conformance test suite\n\
+     \x20 --bench [file]         Run LMON vs JSON parse benchmark\n"
 }
 
 fn main() {
@@ -1292,12 +1499,23 @@ fn main() {
     let mut out_lmon = false;
     let mut from_json = false;
     let mut check_only = false;
+    let mut indent_unit = "    ";
     let mut target: Option<&str> = None;
 
-    for arg in &args {
-        match arg.as_str() {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
             "-c" | "--compact" => compact = true,
             "-l" | "--lmon" => out_lmon = true,
+            "--indent" => {
+                i += 1;
+                let Some(val) = args.get(i).and_then(|s| parse_indent_arg(s)) else {
+                    eprintln!("lmon error: --indent must be 2, 4, 6, 8, or tab");
+                    process::exit(2);
+                };
+                indent_unit = val;
+                out_lmon = true;
+            }
             "--from-json" => {
                 from_json = true;
                 out_lmon = true;
@@ -1309,6 +1527,7 @@ fn main() {
             }
             s => target = Some(s),
         }
+        i += 1;
     }
 
     let target_path = match target {
@@ -1358,7 +1577,7 @@ fn main() {
     }
 
     let rendered = if out_lmon {
-        to_lmon(&value)
+        to_lmon_with_indent(&value, indent_unit)
     } else {
         to_json(&value, !compact)
     };

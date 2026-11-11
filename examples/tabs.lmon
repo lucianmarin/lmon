@@ -1,0 +1,14 @@
+profile: "tab-indented"
+indent_style: "tab"
+universal_newlines: ["LF", "CRLF", "CR"]
+cluster:
+	name: "lemon-west"
+	replicas: 3
+	tls: true
+	endpoints:
+		-
+			host: "10.10.0.1"
+			port: 443
+		-
+			host: "10.10.0.2"
+			port: 443

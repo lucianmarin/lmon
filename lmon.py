@@ -48,22 +48,36 @@ _INLINE_MAX_BYTES = 80
 
 
 class LMONDecodeError(ValueError):
-    """Raised when an LMON document violates the LMON 1.0 specification."""
+    """Raised when an LMON document violates the LMON specification."""
 
     def __init__(self, msg: str, doc: str, pos: int) -> None:
-        line = doc.count("\n", 0, pos) + 1
-        last_nl = doc.rfind("\n", 0, pos)
-        col = pos + 1 if last_nl < 0 else pos - last_nl
-        super().__init__(f"{msg}: line {line} column {col} (char {pos})")
+        line = 1
+        col = 1
+        i = 0
+        end = min(pos, len(doc))
+        while i < end:
+            ch = doc[i]
+            if ch == "\n":
+                line += 1
+                col = 1
+            elif ch == "\r":
+                line += 1
+                col = 1
+                if i + 1 < end and doc[i + 1] == "\n":
+                    i += 1
+            else:
+                col += 1
+            i += 1
+        super().__init__(f"{msg}: line {line} column {col} (char {end})")
         self.msg = msg
         self.doc = doc
-        self.pos = pos
+        self.pos = end
         self.lineno = line
         self.colno = col
 
 
 class _Parser:
-    __slots__ = ("s", "n", "pos", "line_indent", "line_start")
+    __slots__ = ("s", "n", "pos", "line_indent", "line_start", "indent_char", "indent_width")
 
     def __init__(self, s: str) -> None:
         self.s = s
@@ -71,6 +85,8 @@ class _Parser:
         self.pos = 0
         self.line_indent = -1
         self.line_start = 0
+        self.indent_char = ""
+        self.indent_width = 0
 
     def error(self, msg: str, pos: Optional[int] = None) -> LMONDecodeError:
         return LMONDecodeError(msg, self.s, self.pos if pos is None else pos)
@@ -78,6 +94,7 @@ class _Parser:
     def peek_line(self) -> int:
         """Advance past blank lines and compute the current line's indentation level.
 
+        Auto-locks indentation unit (2/4/6/8 spaces or 1 tab) on the first indented line.
         Returns indentation level >= 0, or -1 at EOF. Cached until consumed.
         """
         if self.line_indent != -2:
@@ -89,31 +106,124 @@ class _Parser:
 
         while p < n:
             line_begin = p
-            while p < n and s[p] == " ":
-                p += 1
-            if p >= n:
-                self.pos = p
-                self.line_indent = -1
-                return -1
-            ch = s[p]
-            if ch == "\n":
-                p += 1
-                continue
-            if ch == "\r":
-                if p + 1 >= n or s[p + 1] != "\n":
-                    raise self.error("bare CR is not allowed", p)
-                p += 2
-                continue
-            if ch == "\t":
-                raise self.error("tabs are not allowed for indentation", p)
+            first = s[p]
 
-            spaces = p - line_begin
-            if spaces & 3:
-                raise self.error("indentation must be a multiple of 4 spaces", line_begin)
+            if first == " ":
+                while p < n and s[p] == " ":
+                    p += 1
+                if p >= n:
+                    self.pos = p
+                    self.line_indent = -1
+                    return -1
+                ch = s[p]
+                if ch == "\n":
+                    p += 1
+                    continue
+                if ch == "\r":
+                    p += 2 if (p + 1 < n and s[p + 1] == "\n") else 1
+                    continue
+                if ch == "\t":
+                    q = p + 1
+                    while q < n and (s[q] == " " or s[q] == "\t"):
+                        q += 1
+                    if q >= n:
+                        self.pos = q
+                        self.line_indent = -1
+                        return -1
+                    if s[q] == "\n":
+                        p = q + 1
+                        continue
+                    if s[q] == "\r":
+                        p = (q + 2) if (q + 1 < n and s[q + 1] == "\n") else (q + 1)
+                        continue
+                    raise self.error("mixed spaces and tabs in indentation", p)
+
+                count = p - line_begin
+                if not self.indent_char:
+                    if count not in (2, 4, 6, 8):
+                        raise self.error(
+                            "indentation unit must be 2, 4, 6, or 8 spaces (or 1 tab)",
+                            line_begin,
+                        )
+                    self.indent_char = " "
+                    self.indent_width = count
+                    level = 1
+                elif self.indent_char != " ":
+                    raise self.error(
+                        "inconsistent indentation: document uses tabs, got spaces",
+                        line_begin,
+                    )
+                else:
+                    w = self.indent_width
+                    if count % w != 0:
+                        raise self.error(
+                            f"indentation must be a multiple of {w} spaces", line_begin
+                        )
+                    level = count // w
+
+                self.pos = p
+                self.line_start = line_begin
+                self.line_indent = level
+                return level
+
+            if first == "\t":
+                while p < n and s[p] == "\t":
+                    p += 1
+                if p >= n:
+                    self.pos = p
+                    self.line_indent = -1
+                    return -1
+                ch = s[p]
+                if ch == "\n":
+                    p += 1
+                    continue
+                if ch == "\r":
+                    p += 2 if (p + 1 < n and s[p + 1] == "\n") else 1
+                    continue
+                if ch == " ":
+                    q = p + 1
+                    while q < n and (s[q] == " " or s[q] == "\t"):
+                        q += 1
+                    if q >= n:
+                        self.pos = q
+                        self.line_indent = -1
+                        return -1
+                    if s[q] == "\n":
+                        p = q + 1
+                        continue
+                    if s[q] == "\r":
+                        p = (q + 2) if (q + 1 < n and s[q + 1] == "\n") else (q + 1)
+                        continue
+                    raise self.error("mixed tabs and spaces in indentation", p)
+
+                count = p - line_begin
+                if not self.indent_char:
+                    if count != 1:
+                        raise self.error("first indented block must start at 1 tab", line_begin)
+                    self.indent_char = "\t"
+                    self.indent_width = 1
+                elif self.indent_char != "\t":
+                    raise self.error(
+                        "inconsistent indentation: document uses spaces, got tab",
+                        line_begin,
+                    )
+
+                self.pos = p
+                self.line_start = line_begin
+                self.line_indent = count
+                return count
+
+            if first == "\n":
+                p += 1
+                continue
+            if first == "\r":
+                p += 2 if (p + 1 < n and s[p + 1] == "\n") else 1
+                continue
+
             self.pos = p
             self.line_start = line_begin
-            self.line_indent = spaces >> 2
-            return self.line_indent
+            self.line_indent = 0
+            return 0
 
         self.pos = p
         self.line_indent = -1
@@ -134,11 +244,9 @@ class _Parser:
             self.line_indent = -2
             return
         if ch == "\r":
-            if p + 1 < n and s[p + 1] == "\n":
-                self.pos = p + 2
-                self.line_indent = -2
-                return
-            raise self.error("bare CR is not allowed", p)
+            self.pos = (p + 2) if (p + 1 < n and s[p + 1] == "\n") else (p + 1)
+            self.line_indent = -2
+            return
         if ch == "\t":
             raise self.error("tabs are not allowed outside strings", p)
         if ch == " ":
@@ -506,8 +614,18 @@ def _try_format_inline(val: Any) -> Optional[str]:
     raise TypeError(f"Object of type {type(val).__name__} is not LMON serializable")
 
 
-def _emit_block(val: Any, indent: int, lines: List[str]) -> None:
-    prefix = "    " * indent
+def _normalize_indent(indent: Any) -> str:
+    if isinstance(indent, int) and not isinstance(indent, bool):
+        if indent in (2, 4, 6, 8):
+            return " " * indent
+    elif isinstance(indent, str):
+        if indent == "\t" or (len(indent) in (2, 4, 6, 8) and indent.strip(" ") == ""):
+            return indent
+    raise ValueError("indent must be 2, 4, 6, or 8 (spaces) or '\\t'")
+
+
+def _emit_block(val: Any, depth: int, unit: str, lines: List[str]) -> None:
+    prefix = unit * depth
     if isinstance(val, dict):
         for k, v in val.items():
             fkey = _format_key(k)
@@ -516,7 +634,7 @@ def _emit_block(val: Any, indent: int, lines: List[str]) -> None:
                 lines.append(f"{prefix}{fkey}: {inline}")
             else:
                 lines.append(f"{prefix}{fkey}:")
-                _emit_block(v, indent + 1, lines)
+                _emit_block(v, depth + 1, unit, lines)
     elif isinstance(val, (list, tuple)):
         for item in val:
             inline = _try_format_inline(item)
@@ -524,24 +642,25 @@ def _emit_block(val: Any, indent: int, lines: List[str]) -> None:
                 lines.append(f"{prefix}- {inline}")
             else:
                 lines.append(f"{prefix}-")
-                _emit_block(item, indent + 1, lines)
+                _emit_block(item, depth + 1, unit, lines)
     else:
         raise TypeError(f"Object of type {type(val).__name__} is not LMON serializable")
 
 
-def dumps(obj: Any) -> str:
-    """Serialize a Python JSON-compatible value into canonical LMON 1.0 text."""
+def dumps(obj: Any, indent: Any = 4) -> str:
+    """Serialize a Python JSON-compatible value into LMON text (default 4-space indent)."""
+    unit = _normalize_indent(indent)
     inline = _try_format_inline(obj)
     if inline is not None:
         return inline + "\n"
     lines: List[str] = []
-    _emit_block(obj, 0, lines)
+    _emit_block(obj, 0, unit, lines)
     return "\n".join(lines) + "\n"
 
 
-def dump(obj: Any, fp: IO[str]) -> None:
-    """Serialize a Python JSON-compatible value to a text stream as canonical LMON."""
-    fp.write(dumps(obj))
+def dump(obj: Any, fp: IO[str], indent: Any = 4) -> None:
+    """Serialize a Python JSON-compatible value to a text stream as LMON."""
+    fp.write(dumps(obj, indent=indent))
 
 
 # ---------------------------------------------------------------------------
@@ -582,22 +701,31 @@ def _run_tests() -> int:
     ]
 
     for name, expected in cases:
-        encoded = dumps(expected)
-        decoded = loads(encoded)
-        if decoded != expected:
-            print(f"FAIL [{name}]: round-trip mismatch\nGot: {decoded!r}\nExp: {expected!r}", file=sys.stderr)
-            return 1
+        for ind in (2, 4, 6, 8, "\t"):
+            encoded = dumps(expected, indent=ind)
+            decoded = loads(encoded)
+            if decoded != expected:
+                print(f"FAIL [{name} indent={ind!r}]: round-trip mismatch", file=sys.stderr)
+                return 1
 
-    # Surrogate pair decoding check
     if loads('emoji: "\\uD83C\\uDF4B"\n') != {"emoji": "🍋"}:
         print("FAIL [surrogate_pair]", file=sys.stderr)
+        return 1
+
+    if loads("a:\r\n\tb: 1\rc:\r\t-\r\n\t\tx: true\r\t- 2\r") != {"a": {"b": 1}, "c": [{"x": True}, 2]}:
+        print("FAIL [universal_newlines]", file=sys.stderr)
         return 1
 
     invalid_inputs = [
         "",
         "   \n",
-        "  bad_indent: 1\n",
-        "\ttab: 1\n",
+        "   bad_indent_3: 1\n",
+        "a:\n bad_indent_1: 1\n",
+        "a:\n     bad_indent_5: 1\n",
+        "a:\n\t\ttwo_tabs_first: 1\n",
+        "a:\n  b: 1\n\tc: 2\n",
+        "a:\n\tb: 1\n  c: 2\n",
+        "a:\n \tb: 1\n",
         "dangling:\n",
         "dangling:\nstill_root: 1\n",
         "curly: {\"a\": 1}\n",
@@ -617,7 +745,7 @@ def _run_tests() -> int:
         except LMONDecodeError:
             pass
 
-    print(f"Python LMON: all {len(cases) + len(invalid_inputs) + 1} conformance tests passed.")
+    print(f"Python LMON: all {len(cases) * 5 + len(invalid_inputs) + 2} conformance tests passed.")
     return 0
 
 
@@ -653,16 +781,25 @@ def _run_bench(path: Optional[str]) -> int:
     return 0
 
 
+def _parse_indent_arg(val: str) -> Any:
+    if val in ("2", "4", "6", "8"):
+        return int(val)
+    if val in ("tab", "\\t", "\t"):
+        return "\t"
+    raise ValueError("--indent must be 2, 4, 6, 8, or tab")
+
+
 def _usage() -> str:
     return (
         "Usage: python3 lmon.py [options] <file.lmon | ->\n"
         "Options:\n"
-        "  -c, --compact    Output compact single-line JSON\n"
-        "  -l, --lmon       Output canonical LMON\n"
-        "  --from-json      Parse input as JSON and output canonical LMON\n"
-        "  --check          Validate LMON syntax only\n"
-        "  --test           Run conformance test suite\n"
-        "  --bench [file]   Run parse benchmark\n"
+        "  -c, --compact          Output compact single-line JSON\n"
+        "  -l, --lmon             Output canonical LMON\n"
+        "  --indent <2|4|6|8|tab> Set LMON output indentation (default: 4)\n"
+        "  --from-json            Parse input as JSON and output LMON\n"
+        "  --check                Validate LMON syntax only\n"
+        "  --test                 Run conformance test suite\n"
+        "  --bench [file]         Run parse benchmark\n"
     )
 
 
@@ -680,12 +817,26 @@ def main(argv: List[str]) -> int:
     out_lmon = False
     from_json = False
     check_only = False
+    indent_opt: Any = 4
     target: Optional[str] = None
 
-    for arg in argv:
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
         if arg in ("-c", "--compact"):
             compact = True
         elif arg in ("-l", "--lmon"):
+            out_lmon = True
+        elif arg == "--indent":
+            i += 1
+            if i >= len(argv):
+                sys.stderr.write(_usage())
+                return 2
+            try:
+                indent_opt = _parse_indent_arg(argv[i])
+            except ValueError as exc:
+                sys.stderr.write(f"lmon error: {exc}\n")
+                return 2
             out_lmon = True
         elif arg == "--from-json":
             from_json = True
@@ -697,6 +848,7 @@ def main(argv: List[str]) -> int:
             return 2
         else:
             target = arg
+        i += 1
 
     if target is None:
         sys.stderr.write(_usage())
@@ -706,7 +858,7 @@ def main(argv: List[str]) -> int:
         if target == "-":
             raw = sys.stdin.read()
         else:
-            with open(target, "r", encoding="utf-8") as f:
+            with open(target, "r", encoding="utf-8", newline="") as f:
                 raw = f.read()
             if target.endswith(".json"):
                 from_json = True
@@ -715,7 +867,7 @@ def main(argv: List[str]) -> int:
         if check_only:
             return 0
         if out_lmon:
-            sys.stdout.write(dumps(data))
+            sys.stdout.write(dumps(data, indent=indent_opt))
         elif compact:
             sys.stdout.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n")
         else:
