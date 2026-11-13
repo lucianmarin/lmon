@@ -30,6 +30,40 @@ nullable_readings:
 - null
 - 19.75
 
+string_batches:
+-
+    - "us-east-1"
+    - "us-west-2"
+-
+    - "eu-central-1"
+    - "eu-west-1"
+
+integer_grid:
+-
+    - 1
+    - 2
+    - 3
+-
+    - 4
+    - 5
+    - 6
+
+float_samples:
+-
+    - 0.125
+    - 0.25
+-
+    - 0.5
+    - 0.75
+
+sparse_slots:
+-
+    - "primary"
+    - null
+-
+    - null
+    - "backup"
+
 nested:
     environments:
     - "development"
@@ -47,3 +81,11 @@ nested:
     fallback_slots:
     - null
     - null
+    failover_groups:
+    -
+        - "node-a1"
+        - "node-a2"
+    -
+        - "node-b1"
+        - null
+
