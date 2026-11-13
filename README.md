@@ -364,7 +364,39 @@ Because the formats encode the same logical document in different byte sizes, **
 
 ---
 
-## License
+## LMON vs YAML
 
-Copyright (c) 2026 Lucian Marin. All Rights Reserved. See [LICENSE](LICENSE).
+YAML was designed for human convenience by making quotes, types, and structure implicit—at the cost of a 23,000-word specification, notorious type-coercion bugs, and slow state-machine parsers. LMON keeps YAML's clean, brace-free block layout while enforcing strict, explicit typing for both humans and machines.
+
+### 1. Clearer Typing of Data Structures for Humans
+
+- **Instant Visual Type Recognition:** Every value's type is immediately obvious without knowing YAML schema rules:
+  - `"..."` is **always** a string.
+  - `0..9` / `-0..9` is **always** a number.
+  - `true` / `false` is **always** a boolean.
+  - `null` is **always** null.
+  - `{}` and `[]` are **always** empty containers.
+- **Unambiguous Block Hierarchy:** An object key ending in `:` (`key:`) MUST be followed on the next line by a block list (`-` at the same level `N`) or a nested object (at level `N + 1`). If a block is accidentally unindented or omitted, LMON reports the exact line and column instead of silently turning `key:` into `null`.
+- **One Way to Write Multiline Lists:** Scalar lists (`- "alpha"`, `- 42`, `- 3.14`, `- null`) and object lists (`-\n    host: "10.0.0.1"`) use the exact same `-` delimiter rule with no mixed inline `- key: value` indentation arithmetic.
+
+### 2. Faster Parsing for Machines
+
+- **1-Byte `LL(1)` Dispatch vs Full-Token Regex Inference:** A YAML parser cannot know whether an unquoted token is a string, integer, float, boolean, date, or null until it scans to the end of the token and runs regular-expression tag resolution. An LMON parser branches on the **first byte** (`"`, `-`/`0-9`, `t`, `f`, `n`, `[`, `{`) with zero backtracking.
+- **Bit-Shift Indentation vs Context-Sensitive Whitespace:** YAML permits arbitrary space counts per nesting level, mixed `- key:` indentation, and complex block-scalar chomping states. LMON locks a single indentation unit (`2`, `4`, `6`, `8` spaces or `\t`) on the first indented line, reducing indentation checks to 32/64-bit word comparisons and bit shifts.
+- **Single-Pass Contiguous Arena DOM:** Because LMON has no anchors (`&id`), aliases (`*id`), merge keys (`<<:`), or multi-line string folding passes, parsers allocate values linearly in a flat contiguous arena (`13,310 docs/s` / `1.2+ GiB/s` in C, `185x` faster than `libyaml`).
+
+### 3. YAML Gotchas Eliminated in LMON
+
+| YAML Gotcha | What Happens in YAML | How LMON Solves It |
+| :--- | :--- | :--- |
+| **The Norway Problem**<br>`country: NO`, `cron: on`, `tls: off`, `answer: y` | Unquoted `NO`, `no`, `off`, `on`, `yes`, `y`, `n` coerce to boolean `false` or `true` (YAML 1.1). | Strings are always double-quoted (`"NO"`, `"on"`); booleans are strictly lowercase `true` or `false`. |
+| **Truncated Versions**<br>`version: 1.20` | Parsed as float `1.2`, silently dropping the trailing zero (`"1.20"` → `1.2`). | Version strings are quoted (`"1.20"`), preserving exact characters; unquoted numbers are always numeric. |
+| **Octal & Leading-Zero Traps**<br>`zip: 01234`, `mode: 0755` | Parsed as octal integer (`01234` → `668`) or stripped of leading zeros. | Leading zeros on numbers (`01234`) are a syntax error; identifiers and codes are quoted (`"01234"`). |
+| **Base-60 (Sexagesimal) Numbers**<br>`port: 80:80`, `duration: 1:20` | Unquoted `80:80` or `1:20` evaluates to base-60 integer `4880` or `80` in YAML 1.1. | Strings require quotes (`"80:80"`), never evaluated as base-60 math. |
+| **Silent `null` from Missing/Misindented Blocks**<br>`database:` _(with unindented children)_ | `database` silently becomes `null` (`~`, `null`, `Null`, `NULL`, or empty) and its children become sibling keys. | Only lowercase `null` is null. A dangling `key:` without a valid child block is a hard syntax error. |
+| **Unquoted Colon / Dash Surprise**<br>`msg: Error: failed`, `- item: 1` | Unquoted `: ` or leading `- ` inside text breaks parsing or silently creates a nested map. | All strings are double-quoted (`"Error: failed"`), so `:` and `-` inside strings never collide with structure. |
+| **9 Multiline String Chomping Modes**<br>`\|`, `>`, `\|-`, `>-`, `\|+`, `>+`, `\|2-` | Subtle differences in trailing newlines and line folding across 9 block-scalar modifiers. | Standard JSON escapes (`\n`, `\t`, `\"`, `\uXXXX`)—100% deterministic across every parser. |
+| **Anchor / Alias Amplification ("Billion Laughs")**<br>`&a [*a, *a, *a]` | Recursive aliases expand exponentially in memory or create cyclic object graphs. | No anchors or aliases; every LMON document is a strict, finite tree. |
+| **Tab Forbidden in Indentation**<br>`\tkey: value` | Tabs are a syntax error in YAML indentation despite looking identical to spaces in editors. | LMON natively supports and auto-detects `\t` indentation (`44.4%` smaller than JSON and faster to parse). |
+
 
