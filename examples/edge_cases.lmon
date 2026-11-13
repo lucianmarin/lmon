@@ -36,6 +36,21 @@ containers:
     empty_obj: {}
     empty_arr: []
     array_of_empties:
-        - {}
-        - []
-        - [{}]
+    - {}
+    - []
+    - [{}]
+    string_list:
+    - "first"
+    - "second"
+    - "third"
+    int_list:
+    - -100
+    - 0
+    - 42
+    float_list:
+    - -1.5
+    - 0.0
+    - 2.71828
+    null_list:
+    - null
+    - null

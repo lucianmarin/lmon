@@ -605,9 +605,12 @@ class Parser {
     return key;
   }
 
-  parseNestedBlock(expectedIndent) {
+  parseNestedBlock(expectedIndent, fromObject = false) {
     const indent = this.peekLine();
     if (indent < 0) this.err("expected indented block, got end of input");
+    if (fromObject && indent === expectedIndent - 1 && this.isDashItem()) {
+      return this.parseBlockArray(expectedIndent - 1, true);
+    }
     if (indent !== expectedIndent) {
       this.err(
         `expected indentation level ${expectedIndent} (${expectedIndent * 4} spaces), got ${indent * 4} spaces`,
@@ -615,7 +618,10 @@ class Parser {
       );
     }
     if (this.isDashItem()) {
-      return this.parseBlockArray(expectedIndent);
+      if (fromObject) {
+        this.err("block array under object key must not be indented", this.lineStart);
+      }
+      return this.parseBlockArray(expectedIndent, false);
     }
     const c = this.s.charCodeAt(this.pos);
     if (c === 34) {
@@ -665,7 +671,7 @@ class Parser {
         this.consumeLineEnd(true);
       } else {
         this.consumeLineEnd(false);
-        val = this.parseNestedBlock(expectedIndent + 1);
+        val = this.parseNestedBlock(expectedIndent + 1, true);
       }
 
       if (key === "__proto__") {
@@ -683,7 +689,7 @@ class Parser {
     return obj;
   }
 
-  parseBlockArray(expectedIndent) {
+  parseBlockArray(expectedIndent, inObject = false) {
     const arr = [];
     for (;;) {
       const indent = this.peekLine();
@@ -692,6 +698,7 @@ class Parser {
         this.err("unexpected indentation inside array", this.lineStart);
       }
       if (!this.isDashItem()) {
+        if (inObject) break;
         this.err("cannot mix object keys and array items at same indentation");
       }
       this.pos++; // '-'
@@ -703,7 +710,7 @@ class Parser {
         this.consumeLineEnd(true);
       } else {
         this.consumeLineEnd(false);
-        elem = this.parseNestedBlock(expectedIndent + 1);
+        elem = this.parseNestedBlock(expectedIndent + 1, false);
       }
       arr.push(elem);
     }
@@ -863,7 +870,7 @@ function emitBlock(val, depth, unit, lines) {
         lines.push(`${prefix}${fk}: ${inline}`);
       } else {
         lines.push(`${prefix}${fk}:`);
-        emitBlock(v, depth + 1, unit, lines);
+        emitBlock(v, Array.isArray(v) ? depth : depth + 1, unit, lines);
       }
     }
   } else {
@@ -959,7 +966,7 @@ if (typeof require !== "undefined" && require.main === module) {
     }
 
     assert.deepStrictEqual(parse('emoji: "\\uD83C\\uDF4B"\n'), { emoji: "🍋" });
-    assert.deepStrictEqual(parse("a:\r\n\tb: 1\rc:\r\t-\r\n\t\tx: true\r\t- 2\r"), {
+    assert.deepStrictEqual(parse("a:\r\n\tb: 1\rc:\r-\r\n\tx: true\r- 2\r"), {
       a: { b: 1 },
       c: [{ x: true }, 2],
     });
@@ -974,6 +981,7 @@ if (typeof require !== "undefined" && require.main === module) {
       "a:\n  b: 1\n\tc: 2\n",
       "a:\n\tb: 1\n  c: 2\n",
       "a:\n \tb: 1\n",
+      "a:\n    - 1\n",
       "dangling:\n",
       "dangling:\nstill_root: 1\n",
       'curly: {"a": 1}\n',

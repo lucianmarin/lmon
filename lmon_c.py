@@ -401,7 +401,8 @@ static int py_emit_block(LmonBuf *b, PyObject *v, size_t indent_level, int depth
                 b->len = colon_pos;
                 b->data[b->len] = '\0';
                 lmon_buf_putc(b, '\n');
-                if (py_emit_block(b, val, indent_level + 1, depth + 1, unit, unit_len) < 0) return -1;
+                size_t child_indent = (PyList_Check(val) || PyTuple_Check(val)) ? indent_level : indent_level + 1;
+                if (py_emit_block(b, val, child_indent, depth + 1, unit, unit_len) < 0) return -1;
             }
         }
         return 0;
@@ -664,7 +665,7 @@ def _run_tests() -> int:
         print("FAIL [surrogate_pair]", file=sys.stderr)
         return 1
 
-    if loads("a:\r\n\tb: 1\rc:\r\t-\r\n\t\tx: true\r\t- 2\r") != {"a": {"b": 1}, "c": [{"x": True}, 2]}:
+    if loads("a:\r\n\tb: 1\rc:\r-\r\n\tx: true\r- 2\r") != {"a": {"b": 1}, "c": [{"x": True}, 2]}:
         print("FAIL [universal_newlines]", file=sys.stderr)
         return 1
 
@@ -678,6 +679,7 @@ def _run_tests() -> int:
         "a:\n  b: 1\n\tc: 2\n",
         "a:\n\tb: 1\n  c: 2\n",
         "a:\n \tb: 1\n",
+        "a:\n    - 1\n",
         "dangling:\n",
         "dangling:\nstill_root: 1\n",
         'curly: {"a": 1}\n',

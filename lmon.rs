@@ -748,16 +748,29 @@ impl<'a> Parser<'a> {
         Ok(Cow::Borrowed(key))
     }
 
-    fn parse_nested_block(&mut self, expected_indent: i32) -> Result<Value<'a>, ParseError> {
+    fn parse_nested_block(
+        &mut self,
+        expected_indent: i32,
+        from_object: bool,
+    ) -> Result<Value<'a>, ParseError> {
         let indent = self.peek_line()?;
         if indent < 0 {
             return self.err("expected indented block, got end of input", self.pos);
+        }
+        if from_object && indent == expected_indent - 1 && self.is_dash_item() {
+            return self.parse_block_array(expected_indent - 1, true);
         }
         if indent != expected_indent {
             return self.err("unexpected block indentation level", self.line_start);
         }
         if self.is_dash_item() {
-            return self.parse_block_array(expected_indent);
+            if from_object {
+                return self.err(
+                    "block array under object key must not be indented",
+                    self.line_start,
+                );
+            }
+            return self.parse_block_array(expected_indent, false);
         }
         let b = self.bytes[self.pos];
         if b == b'"' {
@@ -813,7 +826,7 @@ impl<'a> Parser<'a> {
                 v
             } else {
                 self.consume_line_end(false)?;
-                self.parse_nested_block(expected_indent + 1)?
+                self.parse_nested_block(expected_indent + 1, true)?
             };
 
             members.push((key, val)); // O(1) flat-DOM append
@@ -822,7 +835,11 @@ impl<'a> Parser<'a> {
         Ok(Value::Object(members))
     }
 
-    fn parse_block_array(&mut self, expected_indent: i32) -> Result<Value<'a>, ParseError> {
+    fn parse_block_array(
+        &mut self,
+        expected_indent: i32,
+        in_object: bool,
+    ) -> Result<Value<'a>, ParseError> {
         let mut items: Vec<Value<'a>> = Vec::with_capacity(8);
 
         loop {
@@ -834,6 +851,9 @@ impl<'a> Parser<'a> {
                 return self.err("unexpected indentation inside array", self.line_start);
             }
             if !self.is_dash_item() {
+                if in_object {
+                    break;
+                }
                 return self.err(
                     "cannot mix object keys and array items at same indentation",
                     self.pos,
@@ -848,7 +868,7 @@ impl<'a> Parser<'a> {
                 v
             } else {
                 self.consume_line_end(false)?;
-                self.parse_nested_block(expected_indent + 1)?
+                self.parse_nested_block(expected_indent + 1, false)?
             };
             items.push(elem);
         }
@@ -870,7 +890,7 @@ impl<'a> Parser<'a> {
         }
 
         let root = if self.is_dash_item() {
-            self.parse_block_array(0)?
+            self.parse_block_array(0, false)?
         } else {
             let b = self.bytes[self.pos];
             if b == b'"' {
@@ -1154,7 +1174,11 @@ fn emit_block(out: &mut String, v: &Value<'_>, depth: usize, unit: &str) -> Resu
                 } else {
                     out.truncate(colon_pos);
                     out.push('\n');
-                    emit_block(out, val, depth + 1, unit)?;
+                    let child_depth = match val {
+                        Value::Array(_) => depth,
+                        _ => depth + 1,
+                    };
+                    emit_block(out, val, child_depth, unit)?;
                 }
             }
             Ok(())
@@ -1322,7 +1346,7 @@ fn run_tests() -> i32 {
     }
 
     // Universal newlines (\r\n, \r, \n) + tab indentation test
-    let univ = parse("a:\r\n\tb: 1\rc:\r\t-\r\n\t\tx: true\r\t- 2\r").expect("universal newlines");
+    let univ = parse("a:\r\n\tb: 1\rc:\r-\r\n\tx: true\r- 2\r").expect("universal newlines");
     let univ_exp = parse_json("{\"a\":{\"b\":1},\"c\":[{\"x\":true},2]}").unwrap();
     if univ != univ_exp {
         eprintln!("FAIL [universal_newlines]");
@@ -1340,6 +1364,7 @@ fn run_tests() -> i32 {
         "a:\n  b: 1\n\tc: 2\n",
         "a:\n\tb: 1\n  c: 2\n",
         "a:\n \tb: 1\n",
+        "a:\n    - 1\n",
         "dangling:\n",
         "dangling:\nstill_root: 1\n",
         "curly: {\"a\": 1}\n",
@@ -1381,7 +1406,7 @@ fn run_bench(path: Option<&str>) -> i32 {
             let active = if i % 2 == 0 { "true" } else { "false" };
             let latency = 1.25 * ((i % 17) as f64);
             s.push_str(&format!(
-                "    -\n        id: {i}\n        name: \"service-node-{i}\"\n        active: {active}\n        latency_ms: {latency:.3}\n        tags: [\"edge\", \"lemon\", \"v1\"]\n        meta:\n            region: \"eu-central\"\n            capacity: {}\n            extra: {{}}\n",
+                "-\n    id: {i}\n    name: \"service-node-{i}\"\n    active: {active}\n    latency_ms: {latency:.3}\n    tags: [\"edge\", \"lemon\", \"v1\"]\n    meta:\n        region: \"eu-central\"\n        capacity: {}\n        extra: {{}}\n",
                 256 + i
             ));
         }
@@ -1397,6 +1422,11 @@ fn run_bench(path: Option<&str>) -> i32 {
     };
     let tab_sample = to_lmon_with_indent(&parsed, "\t").unwrap();
     let json_sample = to_json(&parsed, true).unwrap();
+    let sample = if path.is_some() {
+        sample
+    } else {
+        to_lmon_with_indent(&parsed, "    ").unwrap()
+    };
 
     let kb = (sample.len() as f64) / 1024.0;
     let iterations = ((150_000.0 / kb.max(1.0)) as usize).max(100);

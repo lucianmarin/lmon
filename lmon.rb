@@ -437,14 +437,20 @@ module LMON
       key
     end
 
-    def parse_nested_block(expected_indent)
+    def parse_nested_block(expected_indent, from_object = false)
       indent = peek_line
       error("expected indented block, got end of input") if indent < 0
+      if from_object && indent == expected_indent - 1 && dash_item?
+        return parse_block_array(expected_indent - 1, true)
+      end
       if indent != expected_indent
         error("expected indentation level #{expected_indent} (#{expected_indent * 4} spaces), got #{indent * 4} spaces", @line_start)
       end
 
-      return parse_block_array(expected_indent) if dash_item?
+      if dash_item?
+        error("block array under object key must not be indented", @line_start) if from_object
+        return parse_block_array(expected_indent, false)
+      end
 
       b = @s.getbyte(@sc.pos)
       if b == 0x22
@@ -482,20 +488,24 @@ module LMON
           consume_line_end(true)
         else
           consume_line_end(false)
-          val = parse_nested_block(expected_indent + 1)
+          val = parse_nested_block(expected_indent + 1, true)
         end
         obj[key] = val
       end
       obj
     end
 
-    def parse_block_array(expected_indent)
+    def parse_block_array(expected_indent, in_object = false)
       arr = []
       loop do
         indent = peek_line
         break if indent < expected_indent
         error("unexpected indentation inside array", @line_start) if indent > expected_indent
-        error("cannot mix object keys and array items at same indentation") unless dash_item?
+        unless dash_item?
+          break if in_object
+
+          error("cannot mix object keys and array items at same indentation")
+        end
         @sc.pos += 1 # '-'
 
         if @s.getbyte(@sc.pos) == 0x20
@@ -504,7 +514,7 @@ module LMON
           consume_line_end(true)
         else
           consume_line_end(false)
-          elem = parse_nested_block(expected_indent + 1)
+          elem = parse_nested_block(expected_indent + 1, false)
         end
         arr << elem
       end
@@ -612,7 +622,8 @@ module LMON
           lines << "#{prefix}#{fkey}: #{inline}"
         else
           lines << "#{prefix}#{fkey}:"
-          emit_block(v, depth + 1, unit, lines)
+          child_depth = v.is_a?(Array) ? depth : depth + 1
+          emit_block(v, child_depth, unit, lines)
         end
       end
     elsif val.is_a?(Array)
@@ -712,7 +723,7 @@ if __FILE__ == $PROGRAM_NAME
       exit 1
     end
 
-    if LMON.loads("a:\r\n\tb: 1\rc:\r\t-\r\n\t\tx: true\r\t- 2\r") != { "a" => { "b" => 1 }, "c" => [{ "x" => true }, 2] }
+    if LMON.loads("a:\r\n\tb: 1\rc:\r-\r\n\tx: true\r- 2\r") != { "a" => { "b" => 1 }, "c" => [{ "x" => true }, 2] }
       warn "FAIL [universal_newlines]"
       exit 1
     end
@@ -727,6 +738,7 @@ if __FILE__ == $PROGRAM_NAME
       "a:\n  b: 1\n\tc: 2\n",
       "a:\n\tb: 1\n  c: 2\n",
       "a:\n \tb: 1\n",
+      "a:\n    - 1\n",
       "dangling:\n",
       "dangling:\nstill_root: 1\n",
       "curly: {\"a\": 1}\n",

@@ -1024,21 +1024,28 @@ static inline bool lmon_parse_key(LmonParser *ps, LmonStr *out) {
 }
 
 static bool lmon_parse_block_object(LmonParser *ps, int expected_indent, const LmonStr *first_key, LmonValue *out);
-static bool lmon_parse_block_array(LmonParser *ps, int expected_indent, LmonValue *out);
+static bool lmon_parse_block_array(LmonParser *ps, int expected_indent, bool in_object, LmonValue *out);
 
-static bool lmon_parse_nested_block(LmonParser *ps, int expected_indent, LmonValue *out) {
+static bool lmon_parse_nested_block(LmonParser *ps, int expected_indent, bool from_object, LmonValue *out) {
     int indent = lmon_peek_line(ps);
     if (indent == -3) return false;
     if (indent < 0) {
         lmon_set_error(ps, "expected indented block, got end of input", ps->p);
         return false;
     }
+    if (from_object && indent == expected_indent - 1 && lmon_is_dash_item(ps)) {
+        return lmon_parse_block_array(ps, expected_indent - 1, true, out);
+    }
     if (indent != expected_indent) {
         lmon_set_error(ps, "unexpected block indentation level", ps->line_start);
         return false;
     }
     if (lmon_is_dash_item(ps)) {
-        return lmon_parse_block_array(ps, expected_indent, out);
+        if (from_object) {
+            lmon_set_error(ps, "block array under object key must not be indented", ps->line_start);
+            return false;
+        }
+        return lmon_parse_block_array(ps, expected_indent, false, out);
     }
     unsigned char c = (unsigned char)*ps->p;
     if (c == '"') {
@@ -1120,7 +1127,7 @@ static bool lmon_parse_block_object(LmonParser *ps, int expected_indent, const L
             }
         } else {
             if (!lmon_consume_line_end(ps, false) ||
-                !lmon_parse_nested_block(ps, expected_indent + 1, &tmp[len].val)) {
+                !lmon_parse_nested_block(ps, expected_indent + 1, true, &tmp[len].val)) {
                 if (tmp != stack_buf) free(tmp);
                 return false;
             }
@@ -1142,7 +1149,7 @@ static bool lmon_parse_block_object(LmonParser *ps, int expected_indent, const L
     return true;
 }
 
-static bool lmon_parse_block_array(LmonParser *ps, int expected_indent, LmonValue *out) {
+static bool lmon_parse_block_array(LmonParser *ps, int expected_indent, bool in_object, LmonValue *out) {
     LmonValue stack_buf[16];
     size_t cap = 16;
     size_t len = 0;
@@ -1158,6 +1165,7 @@ static bool lmon_parse_block_array(LmonParser *ps, int expected_indent, LmonValu
             return false;
         }
         if (!lmon_is_dash_item(ps)) {
+            if (in_object) break;
             if (tmp != stack_buf) free(tmp);
             lmon_set_error(ps, "cannot mix object keys and array items at same indentation", ps->p);
             return false;
@@ -1186,7 +1194,7 @@ static bool lmon_parse_block_array(LmonParser *ps, int expected_indent, LmonValu
             }
         } else {
             if (!lmon_consume_line_end(ps, false) ||
-                !lmon_parse_nested_block(ps, expected_indent + 1, &tmp[len])) {
+                !lmon_parse_nested_block(ps, expected_indent + 1, false, &tmp[len])) {
                 if (tmp != stack_buf) free(tmp);
                 return false;
             }
@@ -1249,7 +1257,7 @@ LmonValue *lmon_parse(const char *src, size_t len, LmonArena *arena, LmonError *
 
     bool ok = false;
     if (lmon_is_dash_item(&ps)) {
-        ok = lmon_parse_block_array(&ps, 0, root);
+        ok = lmon_parse_block_array(&ps, 0, false, root);
     } else {
         unsigned char c = (unsigned char)*ps.p;
         if (c == '"') {
@@ -1740,7 +1748,8 @@ static void lmon_emit_block(LmonBuf *b, const LmonValue *v, size_t depth, const 
                 b->len = colon_pos;
                 b->data[b->len] = '\0';
                 lmon_buf_putc(b, '\n');
-                lmon_emit_block(b, &v->u.obj.members[i].val, depth + 1, unit, unit_len);
+                size_t child_depth = (v->u.obj.members[i].val.type == LMON_ARRAY) ? depth : depth + 1;
+                lmon_emit_block(b, &v->u.obj.members[i].val, child_depth, unit, unit_len);
             }
         }
     } else if (v->type == LMON_ARRAY) {
@@ -1879,7 +1888,7 @@ static int run_tests(void) {
 
     /* Universal newlines test (\r\n and bare \r mixed with \n) */
     {
-        const char *univ = "a:\r\n\tb: 1\rc:\r\t-\r\n\t\tx: true\r\t- 2\r";
+        const char *univ = "a:\r\n\tb: 1\rc:\r-\r\n\tx: true\r- 2\r";
         LmonArena a;
         LmonError err;
         lmon_arena_init(&a, 1024);
@@ -1908,6 +1917,7 @@ static int run_tests(void) {
         "a:\n  b: 1\n\tc: 2\n",
         "a:\n\tb: 1\n  c: 2\n",
         "a:\n \tb: 1\n",
+        "a:\n    - 1\n",
         "dangling:\n",
         "dangling:\nstill_root: 1\n",
         "curly: {\"a\": 1}\n",
@@ -1955,16 +1965,16 @@ static int run_bench(const char *path) {
             char row[256];
             int n = snprintf(
                 row, sizeof(row),
-                "    -\n"
-                "        id: %d\n"
-                "        name: \"service-node-%d\"\n"
-                "        active: %s\n"
-                "        latency_ms: %.3f\n"
-                "        tags: [\"edge\", \"lemon\", \"v1\"]\n"
-                "        meta:\n"
-                "            region: \"eu-central\"\n"
-                "            capacity: %d\n"
-                "            extra: {}\n",
+                "-\n"
+                "    id: %d\n"
+                "    name: \"service-node-%d\"\n"
+                "    active: %s\n"
+                "    latency_ms: %.3f\n"
+                "    tags: [\"edge\", \"lemon\", \"v1\"]\n"
+                "    meta:\n"
+                "        region: \"eu-central\"\n"
+                "        capacity: %d\n"
+                "        extra: {}\n",
                 i, i, (i % 2 == 0) ? "true" : "false", 1.25 * (double)(i % 17), 256 + i
             );
             lmon_buf_Append(&b, row, (size_t)n);
@@ -1987,6 +1997,10 @@ static int run_bench(const char *path) {
     char *lmon_tab_sample = lmon_to_lmon_indent(parsed, "\t", &lmon_tab_len);
     size_t json_len = 0;
     char *json_sample = lmon_to_json(parsed, true, &json_len);
+    if (!path) {
+        free(lmon4_sample);
+        lmon4_sample = lmon_to_lmon_indent(parsed, "    ", &lmon4_len);
+    }
     lmon_arena_free(&setup_arena);
 
     double kb = (double)lmon4_len / 1024.0;

@@ -36,14 +36,14 @@ limits:
     max_connections: 1024
     timeout_sec: 15.5
 upstreams:
-    -
-        host: "10.0.0.1"
-        port: 8080
-        healthy: true
-    -
-        host: "10.0.0.2"
-        port: 8081
-        healthy: false
+-
+    host: "10.0.0.1"
+    port: 8080
+    healthy: true
+-
+    host: "10.0.0.2"
+    port: 8081
+    healthy: false
 "http/headers":
     "x-powered-by": "Lemon"
     "200": "OK"
@@ -149,13 +149,16 @@ A non-empty object at indentation level `N` is written as one or more key/value 
 - **Inline property:** `<indent(N)><key>: <inline-value><EOL>`
   - Exactly **one** ASCII space (`0x20`) MUST follow `:`.
 - **Nested block property:** `<indent(N)><key>:<EOL>`
-  - Immediately followed on the next non-blank line by a nested **Block Object** or **Block Array** at indentation level `N + 1`.
-  - If EOF occurs or the next non-blank line has indentation `<= N` or `> N + 1`, the parser MUST raise a syntax error.
-  - A nested block at `N + 1` MUST be a Block Object or Block Array (never a standalone scalar; scalars are always written inline).
+  - Immediately followed on the next non-blank line by either:
+    - A nested **Block Array** (`- ...`) at the **same indentation level `N`** (the `-` token acts as the list delimiter at level `N`, with each item's nested block at `N + 1`), or
+    - A nested **Block Object** at indentation level **`N + 1`**.
+  - Indenting a `-` block array to `N + 1` directly under `key:` is a **syntax error**.
+  - If EOF occurs or the next non-blank line does not match a Block Array at `N` or a Block Object at `N + 1`, the parser MUST raise a syntax error.
+  - A nested block MUST be a Block Object or Block Array (never a standalone scalar; scalars are always written inline).
 
 ### 6. Arrays (Inline and Block)
 
-LMON supports both compact inline arrays and indented block arrays:
+LMON supports both compact inline arrays and block arrays:
 
 1. **Inline Array:** `[<inline-value>, <inline-value>, ...]`
    - Single-line comma-separated sequence of `<inline-value>` elements.
@@ -165,11 +168,40 @@ LMON supports both compact inline arrays and indented block arrays:
 
 2. **Block Array:** One or more `-` entries at indentation level `N`:
    - **Inline element:** `<indent(N)>- <inline-value><EOL>`
-     - `-` followed by a single ASCII space (`0x20`) and an `<inline-value>`.
+     - `-` followed by a single ASCII space (`0x20`) and an `<inline-value>` (string, integer, float, boolean, `null`, `{}`, `[]`, or inline array).
    - **Nested block element:** `<indent(N)>-<EOL>`
-     - `-` followed immediately by `<EOL>`, then a nested **Block Object** or **Block Array** at indentation level `N + 1`.
+     - `-` followed immediately by `<EOL>`, then a nested **Block Object** or nested **Block Array** at indentation level `N + 1`.
+   - **Unindented list under an object key:** When a Block Array is the value of an object property `<indent(N)><key>:`, its `-` entries sit at level `N` and end when the next sibling `<indent(N)><key>:` appears at level `N` (or when indentation drops below `N`). Outside of an object property (at the document root or inside another `-` array item), mixing `-` entries and `key:` entries at the same indentation level is a **syntax error**.
 
-Block array items (`-`) and block object entries (`key:`) MUST NOT be mixed at the same indentation level within the same block.
+```lmon
+strings:
+- "alpha"
+- "bravo"
+- "charlie"
+integers:
+- 0
+- -42
+- 1024
+floats:
+- 0.5
+- 3.14159
+- -1.25e4
+nulls:
+- null
+- null
+nested:
+    hosts:
+    - "10.0.0.1"
+    - "10.0.0.2"
+    ports:
+    - 8080
+    - 8443
+    weights:
+    - 0.75
+    - 0.25
+    fallbacks:
+    - null
+```
 
 ### 7. Root Document Value
 
@@ -205,7 +237,7 @@ block(n)       = block_object(n) | block_array(n) ;
 
 block_object(n)= obj_entry(n) { blank_lines obj_entry(n) } ;
 obj_entry(n)   = indent(n) key ":" ( " " inline_value ( line_end | EOF )
-                                   | line_end blank_lines block(n + 1) ) ;
+                                   | line_end blank_lines ( block_object(n + 1) | block_array(n) ) ) ;
 
 block_array(n) = arr_entry(n) { blank_lines arr_entry(n) } ;
 arr_entry(n)   = indent(n) "-" ( " " inline_value ( line_end | EOF )
@@ -295,6 +327,7 @@ node lmon.js --test && node lmon.js --bench
 See [`examples/`](examples/) for sample `.lmon` documents ready to parse and inspect on the console:
 
 - [`examples/hello.lmon`](examples/hello.lmon) — Minimal introduction to LMON types and nesting
+- [`examples/lists.lmon`](examples/lists.lmon) — Multi-line block lists of strings, integers, floats, and `null` values
 - [`examples/gateway.lmon`](examples/gateway.lmon) — Service configuration with upstream pools and quoted HTTP header keys
 - [`examples/catalog.lmon`](examples/catalog.lmon) — Product catalog with nested variants, pricing, and inline arrays
 - [`examples/matrix.lmon`](examples/matrix.lmon) — Inline and block multidimensional arrays and coordinates
@@ -307,27 +340,27 @@ See [`examples/`](examples/) for sample `.lmon` documents ready to parse and ins
 
 All benchmarks below were measured on an **Apple M4** (macOS) parsing the **exact same 500-node structured cluster document** (nested objects, strings, integers, floats, booleans, empty containers, and inline arrays):
 
-- **LMON payload (4-space):** `114.3 KiB` (`117,066` bytes) — **tab-indented (`\t`):** `82.1 KiB` (`84,066` bytes, **`-28.2%`**)
-- **JSON payload (2-space formatted):** `138.8 KiB` (`142,089` bytes)
+- **LMON payload (4-space):** `94.8 KiB` (`97,066` bytes, **`-31.7%`** vs JSON) — **tab-indented (`\t`):** `77.2 KiB` (`79,066` bytes, **`-44.4%`** vs JSON)
+- **JSON payload (2-space formatted):** `138.8 KiB` (`142,088` bytes)
 - **YAML payload:** `81.1 KiB` (`83,064` bytes)
 
 Because the formats encode the same logical document in different byte sizes, **`docs/s` (documents parsed per second)** is the primary end-to-end comparison metric, alongside raw byte throughput (**`MiB/s`**).
 
-| Implementation | 4-Space | Tab (`\t`) | Tab vs 4-Space | JSON | LMON (Tab) vs JSON (`docs/s`) |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **C (`lmon.c`)**<br>_`Clang 21 -O3`, flat arena DOM + NEON_ | **`11,422 docs/s`**<br>(`1,283.6 MiB/s`) | **`12,905 docs/s`**<br>(`1,034.6 MiB/s`) | **`+13.0%`** | `11,451 docs/s`<br>(`1,551.7 MiB/s`) | **`1.13x faster`** |
-| **Rust (`lmon.rs`)**<br>_`rustc 1.99.1 -C opt-level=3`, `Cow<str>`_ | **`7,316 docs/s`**<br>(`822.1 MiB/s`) | **`8,569 docs/s`**<br>(`687.0 MiB/s`) | **`+17.1%`** | `8,110 docs/s` _(`lmon.rs` zero-copy JSON)_<br>`~3,400 docs/s` _(`serde_json::Value`)_ | **`1.06x faster`** _(same DOM)_<br>**`~2.5x faster`** _(vs `serde_json`)_ |
-| **Python+C (`lmon_c.py`)**<br>_`Python 3.14`, CPython C API + `lmon.c`_ | **`4,271 docs/s`**<br>(`476.8 MiB/s`) | **`4,318 docs/s`**<br>(`346.2 MiB/s`) | **`+1.1%`** | `2,516 docs/s`<br>(`340.9 MiB/s`, stdlib C `json`) | **`1.72x faster`** _(beats stdlib C `json`!)_ |
-| **JS (`lmon.js`)**<br>_`Node v26.13`, pure JS_ | **`2,833 docs/s`**<br>(`316.3 MiB/s`) | **`3,122 docs/s`**<br>(`250.3 MiB/s`) | **`+10.2%`** | `5,416 docs/s`<br>(`733.9 MiB/s`, V8 C++ `JSON.parse`) | **`0.58x`** _(pure JS vs native C++)_ |
-| **Python (`lmon.py`)**<br>_`Python 3.14`, pure Python_ | **`199.1 docs/s`**<br>(`22.2 MiB/s`) | **`227.5 docs/s`**<br>(`18.2 MiB/s`) | **`+14.3%`** | `2,516 docs/s`<br>(`340.9 MiB/s`, stdlib C `json`) | **`0.09x`** _(pure Py vs native C)_ |
-| **Ruby (`lmon.rb`)**<br>_`Ruby 2.6`, pure Ruby_ | **`125.0 docs/s`**<br>(`14.0 MiB/s`) | **`143.3 docs/s`**<br>(`11.5 MiB/s`) | **`+14.6%`** | `1,192 docs/s`<br>(`161.6 MiB/s`, stdlib C `JSON`) | **`0.12x`** _(pure Ruby vs native C)_ |
+| Implementation | 4-Space (`94.8 KiB`) | Tab `\t` (`77.2 KiB`) | JSON (`138.8 KiB`) | LMON vs JSON (`docs/s`) |
+| :--- | :--- | :--- | :--- | :--- |
+| **C (`lmon.c`)**<br>_`Clang 21 -O3`, flat arena DOM + NEON_ | **`13,138 docs/s`**<br>(`1,216.1 MiB/s`) | **`13,310 docs/s`**<br>(`1,003.6 MiB/s`) | `11,359 docs/s`<br>(`1,539.2 MiB/s`) | **`1.16x` (4-space) / `1.17x` (tab) faster** |
+| **Rust (`lmon.rs`)**<br>_`rustc 1.99.1 -C opt-level=3`, `Cow<str>`_ | **`8,294 docs/s`**<br>(`767.8 MiB/s`) | **`8,373 docs/s`**<br>(`631.4 MiB/s`) | `7,856 docs/s` _(`lmon.rs` zero-copy JSON)_<br>`~3,400 docs/s` _(`serde_json::Value`)_ | **`1.07x faster`** _(same DOM)_<br>**`~2.5x faster`** _(vs `serde_json`)_ |
+| **Python+C (`lmon_c.py`)**<br>_`Python 3.14`, CPython C API + `lmon.c`_ | **`4,506 docs/s`**<br>(`417.1 MiB/s`) | **`4,572 docs/s`**<br>(`344.7 MiB/s`) | `2,565 docs/s`<br>(`347.6 MiB/s`, stdlib C `json`) | **`1.76x` (4-space) / `1.78x` (tab) faster** |
+| **JS (`lmon.js`)**<br>_`Node v26.13`, pure JS_ | **`3,049 docs/s`**<br>(`281.4 MiB/s`) | **`3,307 docs/s`**<br>(`248.4 MiB/s`) | `5,472 docs/s`<br>(`740.0 MiB/s`, V8 C++ `JSON.parse`) | **`0.60x`** _(pure JS vs native C++)_ |
+| **Python (`lmon.py`)**<br>_`Python 3.14`, pure Python_ | **`215.9 docs/s`**<br>(`20.0 MiB/s`) | **`235.9 docs/s`**<br>(`17.8 MiB/s`) | `2,565 docs/s`<br>(`347.6 MiB/s`, stdlib C `json`) | **`0.09x`** _(pure Py vs native C)_ |
+| **Ruby (`lmon.rb`)**<br>_`Ruby 2.6`, pure Ruby_ | **`147.9 docs/s`**<br>(`13.7 MiB/s`) | **`162.9 docs/s`**<br>(`12.3 MiB/s`) | `1,192 docs/s`<br>(`161.6 MiB/s`, stdlib C `JSON`) | **`0.14x`** _(pure Ruby vs native C)_ |
 
 ### Key Benchmark Takeaways
 
-1. **Beats Built-In C `json.loads` in Python (`1.72x` Faster):** Backed by `lmon.c`'s flat DOM and key interning, [`lmon_c.py`](lmon_c.py) parses **4,271 docs/s (`476.8 MiB/s`)** with 4-space indentation and **4,318 docs/s (`346.2 MiB/s`)** with tabs vs stdlib `json.loads` at **2,516 docs/s (`340.9 MiB/s`)**—**1.72x faster per document** than Python's own built-in C JSON parser.
-2. **Over `1.28 GiB/s` in C & `8,569 docs/s` in Safe Rust:** With flat contiguous value arrays, `O(1)` member append, and SIMD ASCII string scanning, `lmon.c` reaches **11,422 docs/s (`1,283.6 MiB/s`)** on 4-space LMON and **12,905 docs/s (`1,034.6 MiB/s`)** on tab-indented LMON (**1.13x faster** than C JSON on the identical flat-DOM engine), while safe Rust `lmon.rs` reaches **8,569 docs/s** (**1.06x faster** than zero-copy Rust JSON and **~2.5x faster** than `serde_json::Value`).
-3. **10–17% Higher Document Throughput with Tab Indentation (`\t`):** Replacing 4-space indentation with single `\t` bytes shrinks the 500-node payload by **28.2%** (`33,000` fewer bytes per document) and `examples/*.lmon` by **14.8%**, boosting parse throughput by **+13.0%** in C, **+17.1%** in Rust, and **+10–15%** across JavaScript, Python, and Ruby.
-4. **Consistently Faster Than YAML Across Every Language:** LMON parses **4x to 55x faster** than equivalent-runtime YAML parsers—and even **pure-Python (`lmon.py`)** and **pure-Ruby (`lmon.rb`)** beat **native C `libyaml`** bindings (`CSafeLoader` and `Psych` at `71.9 docs/s` / `6.4 MiB/s`) by **2.0x to 3.2x**.
+1. **Unindented Block Lists Shrink Payloads Below YAML (`77.2 KiB` vs `81.1 KiB`):** Placing `-` list delimiters at the same indentation level as their parent `key:` removes one full indentation level from every list item and all of its descendants—shrinking 4-space LMON by **17.1%** (`114.3 KiB` → `94.8 KiB`) and tab-indented LMON to **`77.2 KiB`**, smaller than both JSON (`138.8 KiB`, **`-44.4%`**) and YAML (`81.1 KiB`, **`-4.9%`**).
+2. **Beats Built-In C `json.loads` in Python (`1.78x` Faster):** Backed by `lmon.c`'s flat DOM and key interning, [`lmon_c.py`](lmon_c.py) parses **4,506 docs/s (`417.1 MiB/s`)** with 4-space indentation and **4,572 docs/s (`344.7 MiB/s`)** with tabs vs stdlib `json.loads` at **2,565 docs/s (`347.6 MiB/s`)**—**1.78x faster per document** than Python's own built-in C JSON parser.
+3. **Over `13,300 docs/s` in C & `8,370 docs/s` in Safe Rust:** With flat contiguous value arrays, `O(1)` member append, and SIMD ASCII string scanning, `lmon.c` reaches **13,138 docs/s (`1,216.1 MiB/s`)** on 4-space LMON and **13,310 docs/s (`1,003.6 MiB/s`)** on tab-indented LMON (**1.17x faster** than C JSON on the identical flat-DOM engine), while safe Rust `lmon.rs` reaches **8,373 docs/s** (**1.07x faster** than zero-copy Rust JSON and **~2.5x faster** than `serde_json::Value`).
+4. **Consistently Faster Than YAML Across Every Language:** LMON parses **4x to 55x faster** than equivalent-runtime YAML parsers—and even **pure-Python (`lmon.py`)** and **pure-Ruby (`lmon.rb`)** beat **native C `libyaml`** bindings (`CSafeLoader` and `Psych` at `71.9 docs/s` / `6.4 MiB/s`) by **2.3x to 3.3x**.
 
 ---
 

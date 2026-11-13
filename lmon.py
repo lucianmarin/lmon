@@ -422,10 +422,12 @@ class _Parser:
         nxt = s[p + 1]
         return nxt == " " or nxt == "\n" or nxt == "\r"
 
-    def parse_nested_block(self, expected_indent: int) -> Any:
+    def parse_nested_block(self, expected_indent: int, from_object: bool = False) -> Any:
         indent = self.peek_line()
         if indent < 0:
             raise self.error("expected indented block, got end of input")
+        if from_object and indent == expected_indent - 1 and self.is_dash_item():
+            return self.parse_block_array(expected_indent - 1, in_object=True)
         if indent != expected_indent:
             raise self.error(
                 f"expected indentation level {expected_indent} ({expected_indent * 4} spaces), "
@@ -433,7 +435,9 @@ class _Parser:
                 self.line_start,
             )
         if self.is_dash_item():
-            return self.parse_block_array(expected_indent)
+            if from_object:
+                raise self.error("block array under object key must not be indented", self.line_start)
+            return self.parse_block_array(expected_indent, in_object=False)
 
         ch = self.s[self.pos]
         if ch == '"':
@@ -472,12 +476,12 @@ class _Parser:
                 self.consume_line_end(allow_eof=True)
             else:
                 self.consume_line_end(allow_eof=False)
-                val = self.parse_nested_block(expected_indent + 1)
+                val = self.parse_nested_block(expected_indent + 1, from_object=True)
             obj[key] = val
 
         return obj
 
-    def parse_block_array(self, expected_indent: int) -> list:
+    def parse_block_array(self, expected_indent: int, in_object: bool = False) -> list:
         arr: list = []
         while True:
             indent = self.peek_line()
@@ -486,6 +490,8 @@ class _Parser:
             if indent > expected_indent:
                 raise self.error("unexpected indentation inside array", self.line_start)
             if not self.is_dash_item():
+                if in_object:
+                    break
                 raise self.error("cannot mix object keys and array items at same indentation")
             self.pos += 1  # consume '-'
 
@@ -495,7 +501,7 @@ class _Parser:
                 self.consume_line_end(allow_eof=True)
             else:
                 self.consume_line_end(allow_eof=False)
-                elem = self.parse_nested_block(expected_indent + 1)
+                elem = self.parse_nested_block(expected_indent + 1, from_object=False)
             arr.append(elem)
 
         return arr
@@ -634,7 +640,8 @@ def _emit_block(val: Any, depth: int, unit: str, lines: List[str]) -> None:
                 lines.append(f"{prefix}{fkey}: {inline}")
             else:
                 lines.append(f"{prefix}{fkey}:")
-                _emit_block(v, depth + 1, unit, lines)
+                child_depth = depth if isinstance(v, (list, tuple)) else depth + 1
+                _emit_block(v, child_depth, unit, lines)
     elif isinstance(val, (list, tuple)):
         for item in val:
             inline = _try_format_inline(item)
@@ -712,7 +719,7 @@ def _run_tests() -> int:
         print("FAIL [surrogate_pair]", file=sys.stderr)
         return 1
 
-    if loads("a:\r\n\tb: 1\rc:\r\t-\r\n\t\tx: true\r\t- 2\r") != {"a": {"b": 1}, "c": [{"x": True}, 2]}:
+    if loads("a:\r\n\tb: 1\rc:\r-\r\n\tx: true\r- 2\r") != {"a": {"b": 1}, "c": [{"x": True}, 2]}:
         print("FAIL [universal_newlines]", file=sys.stderr)
         return 1
 
@@ -726,6 +733,7 @@ def _run_tests() -> int:
         "a:\n  b: 1\n\tc: 2\n",
         "a:\n\tb: 1\n  c: 2\n",
         "a:\n \tb: 1\n",
+        "a:\n    - 1\n",
         "dangling:\n",
         "dangling:\nstill_root: 1\n",
         "curly: {\"a\": 1}\n",

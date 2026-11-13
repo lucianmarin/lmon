@@ -4,29 +4,29 @@ tax_rate: 0.0825
 featured_skus: ["LMN-001", "LMN-002", "YZU-010"]
 discounts: {}
 products:
+-
+    sku: "LMN-001"
+    title: "Organic Sorrento Lemon"
+    in_stock: true
+    origin:
+        country: "Italy"
+        region: "Campania"
+        coordinates: [40.6263, 14.3758]
+    variants:
     -
-        sku: "LMN-001"
-        title: "Organic Sorrento Lemon"
-        in_stock: true
-        origin:
-            country: "Italy"
-            region: "Campania"
-            coordinates: [40.6263, 14.3758]
-        variants:
-            -
-                pack: "single"
-                price: 0.95
-                stock: 420
-            -
-                pack: "crate-24"
-                price: 19.99
-                stock: 35
+        pack: "single"
+        price: 0.95
+        stock: 420
     -
-        sku: "YZU-010"
-        title: "Kochi Yuzu"
-        in_stock: false
-        origin:
-            country: "Japan"
-            region: "Shikoku"
-            coordinates: [33.5597, 133.5311]
-        variants: []
+        pack: "crate-24"
+        price: 19.99
+        stock: 35
+-
+    sku: "YZU-010"
+    title: "Kochi Yuzu"
+    in_stock: false
+    origin:
+        country: "Japan"
+        region: "Shikoku"
+        coordinates: [33.5597, 133.5311]
+    variants: []

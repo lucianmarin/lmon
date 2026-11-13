@@ -12,16 +12,16 @@ limits:
     retry_backoff_ms: [100, 250, 500, 1000]
 
 upstreams:
-    -
-        host: "10.0.0.1"
-        port: 8080
-        weight: 3
-        healthy: true
-    -
-        host: "10.0.0.2"
-        port: 8081
-        weight: 1
-        healthy: false
+-
+    host: "10.0.0.1"
+    port: 8080
+    weight: 3
+    healthy: true
+-
+    host: "10.0.0.2"
+    port: 8081
+    weight: 1
+    healthy: false
 
 "http/headers":
     "x-powered-by": "Lemon"
