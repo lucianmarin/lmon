@@ -81,7 +81,7 @@ class Parser {
     this.lineStart = 0;
     this.indentCode = 0; // 0 = unlocked, 32 (' ') or 9 ('\t')
     this.indentWidth = 0;
-    this.indentShift = 0; // 0, 1, 2, 3, or -1 for width 6
+    this.indentShift = 0; // >= 0 if indentWidth is a power of 2, else -1
   }
 
   err(msg, at) {
@@ -143,12 +143,9 @@ class Parser {
         const count = p - lineBegin;
         let level;
         if (this.indentCode === 0) {
-          if (count !== 2 && count !== 4 && count !== 6 && count !== 8) {
-            this.err("indentation unit must be 2, 4, 6, or 8 spaces (or 1 tab)", lineBegin);
-          }
           this.indentCode = 32;
           this.indentWidth = count;
-          this.indentShift = count === 2 ? 1 : count === 4 ? 2 : count === 8 ? 3 : -1;
+          this.indentShift = (count & (count - 1)) === 0 ? 31 - Math.clz32(count) : -1;
           level = 1;
         } else if (this.indentCode !== 32) {
           this.err("inconsistent indentation: document uses tabs, got spaces", lineBegin);
@@ -158,10 +155,10 @@ class Parser {
           }
           level = count >> this.indentShift;
         } else {
-          if (count % 6 !== 0) {
-            this.err("indentation must be a multiple of 6 spaces", lineBegin);
+          if (count % this.indentWidth !== 0) {
+            this.err(`indentation must be a multiple of ${this.indentWidth} spaces`, lineBegin);
           }
-          level = (count / 6) | 0;
+          level = (count / this.indentWidth) | 0;
         }
 
         this.pos = p;
@@ -212,21 +209,30 @@ class Parser {
         }
 
         const count = p - lineBegin;
+        let level;
         if (this.indentCode === 0) {
-          if (count !== 1) {
-            this.err("first indented block must start at 1 tab", lineBegin);
-          }
           this.indentCode = 9;
-          this.indentWidth = 1;
-          this.indentShift = 0;
+          this.indentWidth = count;
+          this.indentShift = (count & (count - 1)) === 0 ? 31 - Math.clz32(count) : -1;
+          level = 1;
         } else if (this.indentCode !== 9) {
           this.err("inconsistent indentation: document uses spaces, got tab", lineBegin);
+        } else if (this.indentShift >= 0) {
+          if ((count & (this.indentWidth - 1)) !== 0) {
+            this.err(`indentation must be a multiple of ${this.indentWidth} tabs`, lineBegin);
+          }
+          level = count >> this.indentShift;
+        } else {
+          if (count % this.indentWidth !== 0) {
+            this.err(`indentation must be a multiple of ${this.indentWidth} tabs`, lineBegin);
+          }
+          level = (count / this.indentWidth) | 0;
         }
 
         this.pos = p;
         this.lineStart = lineBegin;
-        this.lineIndent = count;
-        return count;
+        this.lineIndent = level;
+        return level;
       }
 
       if (first === 10) {
@@ -613,7 +619,7 @@ class Parser {
     }
     if (indent !== expectedIndent) {
       this.err(
-        `expected indentation level ${expectedIndent} (${expectedIndent * 4} spaces), got ${indent * 4} spaces`,
+        `expected indentation level ${expectedIndent}, got ${indent}`,
         this.lineStart
       );
     }
@@ -832,19 +838,17 @@ function tryFormatInline(val) {
 
 function normalizeIndent(indent) {
   if (indent === undefined) return "    ";
-  if (indent === 2 || indent === 4 || indent === 6 || indent === 8) {
+  if (typeof indent === "number" && Number.isInteger(indent) && indent >= 1) {
     return " ".repeat(indent);
   }
   if (
-    indent === "\t" ||
-    indent === "  " ||
-    indent === "    " ||
-    indent === "      " ||
-    indent === "        "
+    typeof indent === "string" &&
+    indent.length >= 1 &&
+    (/^ +$/.test(indent) || /^\t+$/.test(indent))
   ) {
     return indent;
   }
-  throw new RangeError("indent must be 2, 4, 6, or 8 (spaces) or '\\t'");
+  throw new RangeError("indent must be a positive integer (spaces) or a non-empty string of spaces or tabs");
 }
 
 function emitBlock(val, depth, unit, lines) {
@@ -912,7 +916,7 @@ if (typeof require !== "undefined" && require.main === module) {
     "Options:\n" +
     "  -c, --compact          Output compact single-line JSON\n" +
     "  -l, --lmon             Output canonical LMON\n" +
-    "  --indent <2|4|6|8|tab> Set LMON output indentation (default: 4)\n" +
+    "  --indent <N|tab>       Set LMON output indentation in spaces or tab (default: 4)\n" +
     "  --from-json            Parse input as JSON and output LMON\n" +
     "  --check                Validate LMON syntax only\n" +
     "  --test                 Run conformance test suite\n" +
@@ -957,8 +961,9 @@ if (typeof require !== "undefined" && require.main === module) {
       ],
     ];
 
+    const indents = [1, 2, 3, 4, 5, 6, 7, 8, "\t", "\t\t"];
     for (const [name, expected] of cases) {
-      for (const ind of [2, 4, 6, 8, "\t"]) {
+      for (const ind of indents) {
         const encoded = stringify(expected, ind);
         const decoded = parse(encoded);
         assert.deepStrictEqual(decoded, expected, `Round-trip failed for ${name} (indent=${ind})`);
@@ -974,10 +979,13 @@ if (typeof require !== "undefined" && require.main === module) {
     const invalid = [
       "",
       "   \n",
-      "   bad_indent_3: 1\n",
-      "a:\n bad_indent_1: 1\n",
-      "a:\n     bad_indent_5: 1\n",
-      "a:\n\t\ttwo_tabs_first: 1\n",
+      "   bad_indent_root: 1\n",
+      "\tbad_indent_root_tab: 1\n",
+      "a:\n    b: 1\n  c: 2\n",
+      "a:\n   b: 1\n     c: 2\n",
+      "a:\n  b:\n      c: 1\n",
+      "a:\n\tb:\n\t\t\tc: 1\n",
+      "a:\n\t\tb: 1\n\tc: 2\n",
       "a:\n  b: 1\n\tc: 2\n",
       "a:\n\tb: 1\n  c: 2\n",
       "a:\n \tb: 1\n",
@@ -1008,7 +1016,7 @@ if (typeof require !== "undefined" && require.main === module) {
       }
     }
 
-    console.log(`JavaScript LMON: all ${cases.length * 5 + invalid.length + 2} conformance tests passed.`);
+    console.log(`JavaScript LMON: all ${cases.length * indents.length + invalid.length + 2} conformance tests passed.`);
     process.exit(0);
   }
 
@@ -1032,25 +1040,36 @@ if (typeof require !== "undefined" && require.main === module) {
     }
 
     const parsed = parse(sample);
+    const sample4 = argv[1] ? sample : stringify(parsed, 4);
+    const sampleTab = stringify(parsed, "\t");
     const jsonSample = JSON.stringify(parsed, null, 2);
-    const lmonBytes = Buffer.byteLength(sample, "utf8");
+    const lmonBytes = Buffer.byteLength(sample4, "utf8");
+    const tabBytes = Buffer.byteLength(sampleTab, "utf8");
     const jsonBytes = Buffer.byteLength(jsonSample, "utf8");
     const kb = lmonBytes / 1024;
     const iterations = Math.max(50, Math.floor(80000 / Math.max(1, kb)));
 
     // V8 JIT warmup
     for (let w = 0; w < 25; w++) {
-      parse(sample);
+      parse(sample4);
+      parse(sampleTab);
       JSON.parse(jsonSample);
     }
 
     let sink = 0;
     const t0 = performance.now();
     for (let i = 0; i < iterations; i++) {
-      const v = parse(sample);
+      const v = parse(sample4);
       if (v) sink++;
     }
     const lmonSec = (performance.now() - t0) / 1000;
+
+    const tTab = performance.now();
+    for (let i = 0; i < iterations; i++) {
+      const v = parse(sampleTab);
+      if (v) sink++;
+    }
+    const tabSec = (performance.now() - tTab) / 1000;
 
     const t1 = performance.now();
     for (let i = 0; i < iterations; i++) {
@@ -1061,10 +1080,18 @@ if (typeof require !== "undefined" && require.main === module) {
     if (sink === -1) console.log(sink);
 
     const lmonMbs = (lmonBytes * iterations) / (1024 * 1024 * lmonSec);
+    const tabMbs = (tabBytes * iterations) / (1024 * 1024 * tabSec);
     const jsonMbs = (jsonBytes * iterations) / (1024 * 1024 * jsonSec);
     console.log(`JavaScript (Node ${process.version}) benchmark (${iterations} iterations):`);
-    console.log(`  LMON (pure JS):   ${kb.toFixed(1)} KiB/doc -> ${lmonSec.toFixed(3)}s (${lmonMbs.toFixed(1)} MiB/s)`);
-    console.log(`  JSON (native C++): ${(jsonBytes / 1024).toFixed(1)} KiB/doc -> ${jsonSec.toFixed(3)}s (${jsonMbs.toFixed(1)} MiB/s)`);
+    console.log(
+      `  LMON (4-space):    ${kb.toFixed(1)} KiB/doc -> ${lmonSec.toFixed(3)}s (${lmonMbs.toFixed(1)} MiB/s, ${(iterations / lmonSec).toFixed(0)} docs/s)`
+    );
+    console.log(
+      `  LMON (tab):        ${(tabBytes / 1024).toFixed(1)} KiB/doc -> ${tabSec.toFixed(3)}s (${tabMbs.toFixed(1)} MiB/s, ${(iterations / tabSec).toFixed(0)} docs/s)`
+    );
+    console.log(
+      `  JSON (native C++): ${(jsonBytes / 1024).toFixed(1)} KiB/doc -> ${jsonSec.toFixed(3)}s (${jsonMbs.toFixed(1)} MiB/s, ${(iterations / jsonSec).toFixed(0)} docs/s)`
+    );
     process.exit(0);
   }
 
@@ -1081,12 +1108,18 @@ if (typeof require !== "undefined" && require.main === module) {
     else if (arg === "-l" || arg === "--lmon") outLmon = true;
     else if (arg === "--indent") {
       const val = argv[++i];
-      if (val === "2" || val === "4" || val === "6" || val === "8") {
-        indentOpt = Number(val);
-      } else if (val === "tab" || val === "\\t" || val === "\t") {
+      if (!val) {
+        process.stderr.write(usage);
+        process.exit(2);
+      }
+      if (val === "tab" || val === "\\t") {
         indentOpt = "\t";
+      } else if (/^[1-9]\d*$/.test(val)) {
+        indentOpt = Number(val);
+      } else if (/^ +$/.test(val) || /^\t+$/.test(val)) {
+        indentOpt = val;
       } else {
-        process.stderr.write("lmon error: --indent must be 2, 4, 6, 8, or tab\n");
+        process.stderr.write("lmon error: --indent must be a positive integer or tab\n");
         process.exit(2);
       }
       outLmon = true;

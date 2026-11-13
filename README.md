@@ -14,7 +14,7 @@ LMON is a **strict, lossless 1-to-1 conversion of JSON** with **no curly braces*
 ## Design Goals
 
 1. **Bijective JSON Equivalence:** Every valid JSON document maps losslessly to LMON and back to the exact same JSON data model (`object`, `array`, `string`, `number`, `true`, `false`, `null`).
-2. **Pythonic Readability:** No `{` `}` curly braces around objects, no trailing comma errors, clean block indentation (`2`, `4`, `6`, `8` spaces or `\t`, auto-detected), and Python-style universal newlines (`\n`, `\r\n`, `\r`).
+2. **Pythonic Readability:** No `{` `}` curly braces around objects, no trailing comma errors, clean block indentation (any consistent number of spaces or tabs per level, auto-detected), and Python-style universal newlines (`\n`, `\r\n`, `\r`).
 3. **Zero Ambiguity (No YAML Footguns):** Strings are always double-quoted (`"NO"` is never coerced to `false`, `"1.20"` never loses trailing zeros), `null` is explicit (`key:` without a nested block is a syntax error, not silent `null`), and there are no comments, anchors, tags, or multiline folding modes.
 4. **Faster Than YAML — and Faster Than JSON:** Auto-detected fixed-stride indentation, single-byte `LL(1)` token dispatch, unquoted ASCII keys requiring zero escape scanning, flat contiguous DOM layout, and fewer structural delimiters enable single-pass arena parsers that surpass both YAML and JSON.
 
@@ -105,13 +105,13 @@ LMON defines **no comments**; every non-blank line represents pure structured da
 1. **UTF-8:** Documents MUST be valid UTF-8 without a byte-order mark (`U+FEFF` at byte 0 is a syntax error).
 2. **Universal Newlines (`LF`, `CRLF`, `CR`):** Just like Python source files, LMON supports `LF` (`\n`, `0x0A`), `CRLF` (`\r\n`, `0x0D 0x0A`), and `CR` (`\r`, `0x0D`) line endings interchangeably outside string literals, normalizing each into a single logical `NEWLINE` token. Documents authored on Linux, macOS, Windows, or classic CR systems parse identically without line-ending errors. The final line MAY omit a trailing newline.
 3. **Blank Lines:** Lines containing zero characters or only ASCII spaces (`0x20`) and/or tabs (`0x09`) before a line ending (or EOF) are blank lines and are ignored anywhere in the document without affecting indentation detection.
-4. **Auto-Detected Indentation (`2`, `4`, `6`, `8` Spaces or `\t`):**
-   - LMON supports five consistent indentation units per level: **2 spaces**, **4 spaces**, **6 spaces**, **8 spaces**, or a **single tab (`\t`, `0x09`)**.
+4. **Auto-Detected Indentation (Any Number of Spaces or Tabs):**
+   - LMON supports any consistent indentation unit per level: **`W` spaces (`W >= 1`)** or **`W` tabs (`W >= 1`, `\t`, `0x09`)**.
    - **Auto-detection rule:** Root entries sit at indentation level `0`. Because LMON blocks always step from level `0` to level `1` before deeper nesting can occur, the **first indented non-blank line** in a document unambiguously establishes the file's indentation unit (`indent_unit`):
-     - `1` leading `\t` locks the document to **tab indentation** (`1` tab per level).
-     - `2`, `4`, `6`, or `8` leading ASCII spaces lock the document to **space indentation** of width `W ∈ {2, 4, 6, 8}` (`W` spaces per level).
-     - Any other leading indentation on the first indented line (e.g. `1`, `3`, `5`, `7`, or `>8` spaces, `>1` tabs, or mixed spaces and tabs) is a **syntax error**.
-   - Every subsequent non-blank line MUST indent using an exact multiple `N * indent_unit` (`N >= 0`) of that detected character and width. Mixing tabs and spaces in indentation—or using `\t` anywhere else outside a string literal—is a **syntax error**.
+     - `W` (`W >= 1`) leading ASCII spaces (`0x20`) lock the document to **space indentation** of width `W` (`W` spaces per level), and that first indented line is at level `1`.
+     - `W` (`W >= 1`) leading ASCII tabs (`0x09`) lock the document to **tab indentation** of width `W` (`W` tabs per level), and that first indented line is at level `1`.
+     - Mixing spaces and tabs in indentation on any non-blank line is a **syntax error**.
+   - Every subsequent non-blank line MUST indent using an exact multiple `N * indent_unit` (`N >= 0`, i.e., `count % W == 0`, with `level = count / W`) of that detected character and width. Using `\t` anywhere else outside a string literal is a **syntax error**.
 5. **No Trailing Whitespace:** Non-blank lines MUST NOT have trailing spaces or tabs after tokens (`key:`, `-`, or inline values).
 
 ### 3. Scalar & Empty Container Literals
@@ -219,7 +219,7 @@ Note how root disambiguation requires zero backtracking:
 
 To produce deterministic LMON from any JSON value:
 
-1. Use `\n` line endings, **4 spaces** per indentation level by default (serializers MAY accept an explicit indent option of `2`, `4`, `6`, `8` spaces, or `"\t"`), and a single trailing `\n` at end of document.
+1. Use `\n` line endings, **4 spaces** per indentation level by default (serializers MAY accept an explicit indent option of any positive number of spaces `W >= 1` or tabs `"\t" * W`), and a single trailing `\n` at end of document.
 2. Serialize keys unquoted when matching `^[A-Za-z_][A-Za-z0-9_-]*$` and not in `{"true", "false", "null"}`; otherwise serialize as a JSON-escaped double-quoted string.
 3. Serialize empty objects as `{}` and empty arrays as `[]`.
 4. Serialize a non-empty array **inline** (`[a, b, c]` with `, ` separators) if and only if:
@@ -249,7 +249,7 @@ unquoted_key   = ( ALPHA | "_" ) { ALPHA | DIGIT | "_" | "-" } - ( "true" | "fal
 inline_value   = json_string | json_number | "true" | "false" | "null" | "{}" | inline_array ;
 inline_array   = "[" ws [ inline_value ws { "," ws inline_value ws } ] "]" ;
 
-indent(n)      = n * indent_unit ;  (* indent_unit locked on 1st indented line: 2/4/6/8 %x20 or 1 %x09 *)
+indent(n)      = n * indent_unit ;  (* indent_unit locked on 1st indented line: 1*(%x20) or 1*(%x09) *)
 ws             = { %x20 } ;
 blank_ws       = { %x20 | %x09 } ;
 blank_lines    = { blank_ws line_end } ;
@@ -262,14 +262,14 @@ line_end       = %x0D %x0A | %x0A | %x0D ;  (* Universal newlines: CRLF | LF | C
 
 | Property | YAML 1.2 | JSON (RFC 8259) | LMON 1.0 |
 | :--- | :--- | :--- | :--- |
-| **Indentation scanner** | Arbitrary spaces, chomping/folding states | Arbitrary whitespace skip | **Fixed stride (`\t` or 2/4/6/8 spaces, locked once)** |
+| **Indentation scanner** | Arbitrary spaces, chomping/folding states | Arbitrary whitespace skip | **Fixed stride (spaces or tabs, locked once)** |
 | **Object delimiters** | Flow `{}` + block mapping + complex keys | `{`, `}`, `,` on every object/field | **None (newline + indent only)** |
 | **Object key scanning** | Multi-rule implicit scalar / colon lookahead | Quote + `\` escape scan on every key | **Raw ASCII scan to `:` (zero escapes)** |
 | **DOM layout** | Pointer-heavy event/graph nodes | Nested value nodes or tape | **Flat contiguous value arrays + `O(1)` append** |
 | **Type resolution** | Regex/tag inference (`yes`, `1.0`, ISO dates) | **1st-byte dispatch** | **1st-byte dispatch** |
 | **Anchors / aliases** | Arbitrary graph references (`&id`, `*id`) | None | **None (strict tree)** |
 
-1. **Auto-Locked Stride Indentation:** Locking the indentation unit on the first indented line turns every subsequent line's nesting check into word-stride comparisons (`0x20202020` / `0x09`) and bit shifts (`spaces >> shift`, or single-byte `\t` count).
+1. **Auto-Locked Stride Indentation:** Locking the indentation unit (`W >= 1` spaces or `W >= 1` tabs) on the first indented line turns every subsequent line's nesting check into word-stride comparisons (`0x20202020` / `0x09`) and power-of-two bit shifts (`count >> shift`) or single-stride division (`count / W`).
 2. **Zero-Copy Unquoted Keys:** The vast majority of object keys match `[A-Za-z_][A-Za-z0-9_-]*`, meaning no opening/closing quotes and **zero backslash-escape branches**—parsers slice key bytes directly from the input buffer.
 3. **Single-Byte Dispatch:** At any value position, the first byte (`"`, `-`/`0-9`, `t`, `f`, `n`, `[`, `{`) uniquely determines the parser branch with zero backtracking.
 4. **Smaller Byte Footprint:** Removing `{`, `}`, `,`, and key quotes typically shrinks pretty-printed JSON payloads by 20–35%, reducing memory bandwidth and lexer iterations.
@@ -305,7 +305,7 @@ node lmon.js examples/gateway.lmon
 # Output compact JSON
 node lmon.js --compact examples/gateway.lmon
 
-# Format/canonicalize LMON (default 4 spaces, or 2/4/6/8/tab) or convert JSON to LMON
+# Format/canonicalize LMON (default 4 spaces, or any N spaces / tab) or convert JSON to LMON
 python3 lmon_c.py --lmon examples/gateway.lmon
 python3 lmon_c.py --indent tab examples/gateway.lmon
 python3 lmon_c.py --from-json input.json
@@ -348,19 +348,19 @@ Because the formats encode the same logical document in different byte sizes, **
 
 | Implementation | 4-Space (`94.8 KiB`) | Tab `\t` (`77.2 KiB`) | JSON (`138.8 KiB`) | LMON vs JSON (`docs/s`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **C (`lmon.c`)**<br>_`Clang 21 -O3`, flat arena DOM + NEON_ | **`13,138 docs/s`**<br>(`1,216.1 MiB/s`) | **`13,310 docs/s`**<br>(`1,003.6 MiB/s`) | `11,359 docs/s`<br>(`1,539.2 MiB/s`) | **`1.16x` (4-space) / `1.17x` (tab) faster** |
-| **Rust (`lmon.rs`)**<br>_`rustc 1.99.1 -C opt-level=3`, `Cow<str>`_ | **`8,294 docs/s`**<br>(`767.8 MiB/s`) | **`8,373 docs/s`**<br>(`631.4 MiB/s`) | `7,856 docs/s` _(`lmon.rs` zero-copy JSON)_<br>`~3,400 docs/s` _(`serde_json::Value`)_ | **`1.07x faster`** _(same DOM)_<br>**`~2.5x faster`** _(vs `serde_json`)_ |
-| **Python+C (`lmon_c.py`)**<br>_`Python 3.14`, CPython C API + `lmon.c`_ | **`4,506 docs/s`**<br>(`417.1 MiB/s`) | **`4,572 docs/s`**<br>(`344.7 MiB/s`) | `2,565 docs/s`<br>(`347.6 MiB/s`, stdlib C `json`) | **`1.76x` (4-space) / `1.78x` (tab) faster** |
-| **JS (`lmon.js`)**<br>_`Node v26.13`, pure JS_ | **`3,049 docs/s`**<br>(`281.4 MiB/s`) | **`3,307 docs/s`**<br>(`248.4 MiB/s`) | `5,472 docs/s`<br>(`740.0 MiB/s`, V8 C++ `JSON.parse`) | **`0.60x`** _(pure JS vs native C++)_ |
-| **Python (`lmon.py`)**<br>_`Python 3.14`, pure Python_ | **`215.9 docs/s`**<br>(`20.0 MiB/s`) | **`235.9 docs/s`**<br>(`17.8 MiB/s`) | `2,565 docs/s`<br>(`347.6 MiB/s`, stdlib C `json`) | **`0.09x`** _(pure Py vs native C)_ |
-| **Ruby (`lmon.rb`)**<br>_`Ruby 2.6`, pure Ruby_ | **`147.9 docs/s`**<br>(`13.7 MiB/s`) | **`162.9 docs/s`**<br>(`12.3 MiB/s`) | `1,192 docs/s`<br>(`161.6 MiB/s`, stdlib C `JSON`) | **`0.14x`** _(pure Ruby vs native C)_ |
+| **C (`lmon.c`)**<br>_`Clang 21 -O3`, flat arena DOM + NEON_ | **`12,664 docs/s`**<br>(`1,172.3 MiB/s`) | **`13,607 docs/s`**<br>(`1,026.0 MiB/s`) | `11,841 docs/s`<br>(`1,604.6 MiB/s`) | **`1.07x` (4-space) / `1.15x` (tab) faster** |
+| **Rust (`lmon.rs`)**<br>_`rustc 1.99.1 -C opt-level=3`, `Cow<str>`_ | **`8,740 docs/s`**<br>(`809.0 MiB/s`) | **`8,763 docs/s`**<br>(`660.8 MiB/s`) | `8,320 docs/s` _(`lmon.rs` zero-copy JSON)_<br>`~3,400 docs/s` _(`serde_json::Value`)_ | **`1.05x faster`** _(same DOM)_<br>**`~2.6x faster`** _(vs `serde_json`)_ |
+| **Python+C (`lmon_c.py`)**<br>_`Python 3.14`, CPython C API + `lmon.c`_ | **`4,467 docs/s`**<br>(`413.5 MiB/s`) | **`4,578 docs/s`**<br>(`345.2 MiB/s`) | `2,583 docs/s`<br>(`350.0 MiB/s`, stdlib C `json`) | **`1.73x` (4-space) / `1.77x` (tab) faster** |
+| **JS (`lmon.js`)**<br>_`Node v26.13`, pure JS_ | **`3,191 docs/s`**<br>(`294.5 MiB/s`) | **`3,296 docs/s`**<br>(`247.6 MiB/s`) | `5,577 docs/s`<br>(`754.1 MiB/s`, V8 C++ `JSON.parse`) | **`0.57x` (4-space) / `0.59x` (tab)** _(pure JS vs native C++)_ |
+| **Python (`lmon.py`)**<br>_`Python 3.14`, pure Python_ | **`216 docs/s`**<br>(`20.0 MiB/s`) | **`235 docs/s`**<br>(`17.7 MiB/s`) | `2,583 docs/s`<br>(`350.0 MiB/s`, stdlib C `json`) | **`0.08x` (4-space) / `0.09x` (tab)** _(pure Py vs native C)_ |
+| **Ruby (`lmon.rb`)**<br>_`Ruby 2.6`, pure Ruby_ | **`150 docs/s`**<br>(`13.9 MiB/s`) | **`163 docs/s`**<br>(`12.3 MiB/s`) | `1,192 docs/s`<br>(`161.6 MiB/s`, stdlib C `JSON`) | **`0.13x` (4-space) / `0.14x` (tab)** _(pure Ruby vs native C)_ |
 
 ### Key Benchmark Takeaways
 
 1. **Unindented Block Lists Shrink Payloads Below YAML (`77.2 KiB` vs `81.1 KiB`):** Placing `-` list delimiters at the same indentation level as their parent `key:` removes one full indentation level from every list item and all of its descendants—shrinking 4-space LMON by **17.1%** (`114.3 KiB` → `94.8 KiB`) and tab-indented LMON to **`77.2 KiB`**, smaller than both JSON (`138.8 KiB`, **`-44.4%`**) and YAML (`81.1 KiB`, **`-4.9%`**).
-2. **Beats Built-In C `json.loads` in Python (`1.78x` Faster):** Backed by `lmon.c`'s flat DOM and key interning, [`lmon_c.py`](lmon_c.py) parses **4,506 docs/s (`417.1 MiB/s`)** with 4-space indentation and **4,572 docs/s (`344.7 MiB/s`)** with tabs vs stdlib `json.loads` at **2,565 docs/s (`347.6 MiB/s`)**—**1.78x faster per document** than Python's own built-in C JSON parser.
-3. **Over `13,300 docs/s` in C & `8,370 docs/s` in Safe Rust:** With flat contiguous value arrays, `O(1)` member append, and SIMD ASCII string scanning, `lmon.c` reaches **13,138 docs/s (`1,216.1 MiB/s`)** on 4-space LMON and **13,310 docs/s (`1,003.6 MiB/s`)** on tab-indented LMON (**1.17x faster** than C JSON on the identical flat-DOM engine), while safe Rust `lmon.rs` reaches **8,373 docs/s** (**1.07x faster** than zero-copy Rust JSON and **~2.5x faster** than `serde_json::Value`).
-4. **Consistently Faster Than YAML Across Every Language:** LMON parses **4x to 55x faster** than equivalent-runtime YAML parsers—and even **pure-Python (`lmon.py`)** and **pure-Ruby (`lmon.rb`)** beat **native C `libyaml`** bindings (`CSafeLoader` and `Psych` at `71.9 docs/s` / `6.4 MiB/s`) by **2.3x to 3.3x**.
+2. **Beats Built-In C `json.loads` in Python (`1.77x` Faster):** Backed by `lmon.c`'s flat DOM and key interning, [`lmon_c.py`](lmon_c.py) parses **4,467 docs/s (`413.5 MiB/s`)** with 4-space indentation and **4,578 docs/s (`345.2 MiB/s`)** with tabs vs stdlib `json.loads` at **2,583 docs/s (`350.0 MiB/s`)**—**1.73x–1.77x faster per document** than Python's own built-in C JSON parser.
+3. **Over `13,600 docs/s` in C & `8,760 docs/s` in Safe Rust:** With flat contiguous value arrays, `O(1)` member append, and SIMD ASCII string scanning, `lmon.c` reaches **12,664 docs/s (`1,172.3 MiB/s`)** on 4-space LMON and **13,607 docs/s (`1,026.0 MiB/s`)** on tab-indented LMON (**1.07x–1.15x faster** than C JSON on the identical flat-DOM engine), while safe Rust `lmon.rs` reaches **8,763 docs/s** (**1.05x faster** than zero-copy Rust JSON and **~2.6x faster** than `serde_json::Value`).
+4. **Consistently Faster Than YAML Across Every Language:** LMON parses **4x to 55x faster** than equivalent-runtime YAML parsers—and even **pure-Python (`lmon.py`)** and **pure-Ruby (`lmon.rb`)** beat **native C `libyaml`** bindings (`CSafeLoader` and `Psych` at `71.9 docs/s` / `6.4 MiB/s`) by **2.1x to 3.3x**.
 
 ---
 
@@ -382,8 +382,8 @@ YAML was designed for human convenience by making quotes, types, and structure i
 ### 2. Faster Parsing for Machines
 
 - **1-Byte `LL(1)` Dispatch vs Full-Token Regex Inference:** A YAML parser cannot know whether an unquoted token is a string, integer, float, boolean, date, or null until it scans to the end of the token and runs regular-expression tag resolution. An LMON parser branches on the **first byte** (`"`, `-`/`0-9`, `t`, `f`, `n`, `[`, `{`) with zero backtracking.
-- **Bit-Shift Indentation vs Context-Sensitive Whitespace:** YAML permits arbitrary space counts per nesting level, mixed `- key:` indentation, and complex block-scalar chomping states. LMON locks a single indentation unit (`2`, `4`, `6`, `8` spaces or `\t`) on the first indented line, reducing indentation checks to 32/64-bit word comparisons and bit shifts.
-- **Single-Pass Contiguous Arena DOM:** Because LMON has no anchors (`&id`), aliases (`*id`), merge keys (`<<:`), or multi-line string folding passes, parsers allocate values linearly in a flat contiguous arena (`13,310 docs/s` / `1.2+ GiB/s` in C, `185x` faster than `libyaml`).
+- **Bit-Shift / Fixed-Stride Indentation vs Context-Sensitive Whitespace:** YAML permits arbitrary space counts per nesting level, mixed `- key:` indentation, and complex block-scalar chomping states. LMON locks a single indentation unit (any consistent number of spaces or tabs) on the first indented line, reducing indentation checks to 32/64-bit word comparisons and bit shifts (or fixed-stride division).
+- **Single-Pass Contiguous Arena DOM:** Because LMON has no anchors (`&id`), aliases (`*id`), merge keys (`<<:`), or multi-line string folding passes, parsers allocate values linearly in a flat contiguous arena (`13,607 docs/s` / `1.17+ GiB/s` in C, `189x` faster than `libyaml`).
 
 ### 3. YAML Gotchas Eliminated in LMON
 

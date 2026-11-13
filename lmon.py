@@ -94,7 +94,7 @@ class _Parser:
     def peek_line(self) -> int:
         """Advance past blank lines and compute the current line's indentation level.
 
-        Auto-locks indentation unit (2/4/6/8 spaces or 1 tab) on the first indented line.
+        Auto-locks indentation unit (any number of spaces or tabs) on the first indented line.
         Returns indentation level >= 0, or -1 at EOF. Cached until consumed.
         """
         if self.line_indent != -2:
@@ -140,11 +140,6 @@ class _Parser:
 
                 count = p - line_begin
                 if not self.indent_char:
-                    if count not in (2, 4, 6, 8):
-                        raise self.error(
-                            "indentation unit must be 2, 4, 6, or 8 spaces (or 1 tab)",
-                            line_begin,
-                        )
                     self.indent_char = " "
                     self.indent_width = count
                     level = 1
@@ -198,20 +193,29 @@ class _Parser:
 
                 count = p - line_begin
                 if not self.indent_char:
-                    if count != 1:
-                        raise self.error("first indented block must start at 1 tab", line_begin)
                     self.indent_char = "\t"
-                    self.indent_width = 1
+                    self.indent_width = count
+                    level = 1
                 elif self.indent_char != "\t":
                     raise self.error(
                         "inconsistent indentation: document uses spaces, got tab",
                         line_begin,
                     )
+                else:
+                    w = self.indent_width
+                    if w == 1:
+                        level = count
+                    else:
+                        if count % w != 0:
+                            raise self.error(
+                                f"indentation must be a multiple of {w} tabs", line_begin
+                            )
+                        level = count // w
 
                 self.pos = p
                 self.line_start = line_begin
-                self.line_indent = count
-                return count
+                self.line_indent = level
+                return level
 
             if first == "\n":
                 p += 1
@@ -430,8 +434,7 @@ class _Parser:
             return self.parse_block_array(expected_indent - 1, in_object=True)
         if indent != expected_indent:
             raise self.error(
-                f"expected indentation level {expected_indent} ({expected_indent * 4} spaces), "
-                f"got {indent * 4} spaces",
+                f"expected indentation level {expected_indent}, got {indent}",
                 self.line_start,
             )
         if self.is_dash_item():
@@ -622,12 +625,12 @@ def _try_format_inline(val: Any) -> Optional[str]:
 
 def _normalize_indent(indent: Any) -> str:
     if isinstance(indent, int) and not isinstance(indent, bool):
-        if indent in (2, 4, 6, 8):
+        if indent >= 1:
             return " " * indent
-    elif isinstance(indent, str):
-        if indent == "\t" or (len(indent) in (2, 4, 6, 8) and indent.strip(" ") == ""):
+    elif isinstance(indent, str) and len(indent) >= 1:
+        if indent.strip(" ") == "" or indent.strip("\t") == "":
             return indent
-    raise ValueError("indent must be 2, 4, 6, or 8 (spaces) or '\\t'")
+    raise ValueError("indent must be a positive integer (spaces) or a non-empty string of spaces or tabs")
 
 
 def _emit_block(val: Any, depth: int, unit: str, lines: List[str]) -> None:
@@ -707,8 +710,9 @@ def _run_tests() -> int:
         ),
     ]
 
+    indents = (1, 2, 3, 4, 5, 6, 7, 8, "\t", "\t\t")
     for name, expected in cases:
-        for ind in (2, 4, 6, 8, "\t"):
+        for ind in indents:
             encoded = dumps(expected, indent=ind)
             decoded = loads(encoded)
             if decoded != expected:
@@ -726,10 +730,13 @@ def _run_tests() -> int:
     invalid_inputs = [
         "",
         "   \n",
-        "   bad_indent_3: 1\n",
-        "a:\n bad_indent_1: 1\n",
-        "a:\n     bad_indent_5: 1\n",
-        "a:\n\t\ttwo_tabs_first: 1\n",
+        "   bad_indent_root: 1\n",
+        "\tbad_indent_root_tab: 1\n",
+        "a:\n    b: 1\n  c: 2\n",
+        "a:\n   b: 1\n     c: 2\n",
+        "a:\n  b:\n      c: 1\n",
+        "a:\n\tb:\n\t\t\tc: 1\n",
+        "a:\n\t\tb: 1\n\tc: 2\n",
         "a:\n  b: 1\n\tc: 2\n",
         "a:\n\tb: 1\n  c: 2\n",
         "a:\n \tb: 1\n",
@@ -753,7 +760,7 @@ def _run_tests() -> int:
         except LMONDecodeError:
             pass
 
-    print(f"Python LMON: all {len(cases) * 5 + len(invalid_inputs) + 2} conformance tests passed.")
+    print(f"Python LMON: all {len(cases) * len(indents) + len(invalid_inputs) + 2} conformance tests passed.")
     return 0
 
 
@@ -775,26 +782,50 @@ def _run_bench(path: Optional[str]) -> int:
         ]
         sample = dumps({"cluster": "lmon-bench", "count": 500, "nodes": records})
 
-    size_kb = len(sample.encode("utf-8")) / 1024.0
+    parsed = loads(sample)
+    sample4 = sample if path else dumps(parsed, indent=4)
+    sample_tab = dumps(parsed, indent="\t")
+    lmon4_bytes = len(sample4.encode("utf-8"))
+    tab_bytes = len(sample_tab.encode("utf-8"))
+    size_kb = lmon4_bytes / 1024.0
     iterations = max(10, int(20000 / max(1.0, size_kb)))
+
+    for _ in range(5):
+        loads(sample4)
+        loads(sample_tab)
+
     t0 = time.perf_counter()
     for _ in range(iterations):
-        loads(sample)
-    elapsed = time.perf_counter() - t0
-    mb_s = (len(sample.encode("utf-8")) * iterations) / (1024.0 * 1024.0 * elapsed)
+        loads(sample4)
+    lmon4_sec = time.perf_counter() - t0
+
+    t_tab = time.perf_counter()
+    for _ in range(iterations):
+        loads(sample_tab)
+    tab_sec = time.perf_counter() - t_tab
+
+    lmon4_mbs = (lmon4_bytes * iterations) / (1024.0 * 1024.0 * lmon4_sec)
+    tab_mbs = (tab_bytes * iterations) / (1024.0 * 1024.0 * tab_sec)
+    print(f"Python LMON benchmark ({iterations} iterations):")
     print(
-        f"Python LMON benchmark: {iterations} iterations x {size_kb:.1f} KiB "
-        f"in {elapsed:.3f}s ({mb_s:.2f} MiB/s)"
+        f"  LMON (4-space): {size_kb:.1f} KiB/doc -> {lmon4_sec:.3f}s "
+        f"({lmon4_mbs:.2f} MiB/s, {iterations / lmon4_sec:.0f} docs/s)"
+    )
+    print(
+        f"  LMON (tab):     {tab_bytes / 1024.0:.1f} KiB/doc -> {tab_sec:.3f}s "
+        f"({tab_mbs:.2f} MiB/s, {iterations / tab_sec:.0f} docs/s)"
     )
     return 0
 
 
 def _parse_indent_arg(val: str) -> Any:
-    if val in ("2", "4", "6", "8"):
-        return int(val)
-    if val in ("tab", "\\t", "\t"):
+    if val in ("tab", "\\t"):
         return "\t"
-    raise ValueError("--indent must be 2, 4, 6, 8, or tab")
+    if val.isdigit() and int(val) >= 1:
+        return int(val)
+    if len(val) >= 1 and (val.strip(" ") == "" or val.strip("\t") == ""):
+        return val
+    raise ValueError("--indent must be a positive integer or tab")
 
 
 def _usage() -> str:
@@ -803,7 +834,7 @@ def _usage() -> str:
         "Options:\n"
         "  -c, --compact          Output compact single-line JSON\n"
         "  -l, --lmon             Output canonical LMON\n"
-        "  --indent <2|4|6|8|tab> Set LMON output indentation (default: 4)\n"
+        "  --indent <N|tab>       Set LMON output indentation in spaces or tab (default: 4)\n"
         "  --from-json            Parse input as JSON and output LMON\n"
         "  --check                Validate LMON syntax only\n"
         "  --test                 Run conformance test suite\n"

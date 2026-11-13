@@ -137,7 +137,8 @@ struct Parser<'a> {
     line_indent: i32, // -2 = uncached, -1 = EOF, >= 0 = indent level
     indent_char: u8,  // 0 = unlocked, b' ' or b'\t'
     indent_width: usize,
-    indent_shift: i32, // 0, 1, 2, 3, or -1 for width 6
+    indent_shift: i32, // >= 0 if indent_width is a power of 2, else -1
+    indent_mask: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -150,7 +151,8 @@ impl<'a> Parser<'a> {
             line_indent: -2,
             indent_char: 0,
             indent_width: 0,
-            indent_shift: 0,
+            indent_shift: -1,
+            indent_mask: 0,
         }
     }
 
@@ -181,6 +183,45 @@ impl<'a> Parser<'a> {
             line,
             col,
         })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn resolve_indent(&mut self, ch: u8, line_begin: usize, count: usize) -> Result<i32, ParseError> {
+        if self.indent_char == 0 {
+            self.indent_char = ch;
+            self.indent_width = count;
+            self.indent_shift = if count.is_power_of_two() {
+                count.trailing_zeros() as i32
+            } else {
+                -1
+            };
+            self.indent_mask = count - 1;
+            return Ok(1);
+        }
+        if self.indent_char != ch {
+            return self.err(
+                if ch == b' ' {
+                    "inconsistent indentation: document uses tabs, got spaces"
+                } else {
+                    "inconsistent indentation: document uses spaces, got tab"
+                },
+                line_begin,
+            );
+        }
+        let w = self.indent_width;
+        let level = count / w;
+        if level * w != count {
+            return self.err(
+                if ch == b' ' {
+                    "indentation is not a multiple of detected space width"
+                } else {
+                    "indentation is not a multiple of detected tab width"
+                },
+                line_begin,
+            );
+        }
+        Ok(level as i32)
     }
 
     #[inline]
@@ -247,40 +288,13 @@ impl<'a> Parser<'a> {
                 }
 
                 let count = p - line_begin;
-                let level = if self.indent_char == 0 {
-                    if !matches!(count, 2 | 4 | 6 | 8) {
-                        return self.err(
-                            "indentation unit must be 2, 4, 6, or 8 spaces (or 1 tab)",
-                            line_begin,
-                        );
-                    }
-                    self.indent_char = b' ';
-                    self.indent_width = count;
-                    self.indent_shift = match count {
-                        2 => 1,
-                        4 => 2,
-                        8 => 3,
-                        _ => -1,
-                    };
-                    1
-                } else if self.indent_char != b' ' {
-                    return self.err(
-                        "inconsistent indentation: document uses tabs, got spaces",
-                        line_begin,
-                    );
-                } else if self.indent_shift >= 0 {
-                    if (count & (self.indent_width - 1)) != 0 {
-                        return self.err(
-                            "indentation is not a multiple of detected space width",
-                            line_begin,
-                        );
-                    }
+                let level = if self.indent_char == b' '
+                    && self.indent_shift >= 0
+                    && (count & self.indent_mask) == 0
+                {
                     (count >> (self.indent_shift as usize)) as i32
                 } else {
-                    if count % 6 != 0 {
-                        return self.err("indentation is not a multiple of 6 spaces", line_begin);
-                    }
-                    (count / 6) as i32
+                    self.resolve_indent(b' ', line_begin, count)?
                 };
 
                 self.pos = p;
@@ -333,24 +347,19 @@ impl<'a> Parser<'a> {
                 }
 
                 let count = p - line_begin;
-                if self.indent_char == 0 {
-                    if count != 1 {
-                        return self.err("first indented block must start at 1 tab", line_begin);
-                    }
-                    self.indent_char = b'\t';
-                    self.indent_width = 1;
-                    self.indent_shift = 0;
-                } else if self.indent_char != b'\t' {
-                    return self.err(
-                        "inconsistent indentation: document uses spaces, got tab",
-                        line_begin,
-                    );
-                }
+                let level = if self.indent_char == b'\t'
+                    && self.indent_shift >= 0
+                    && (count & self.indent_mask) == 0
+                {
+                    (count >> (self.indent_shift as usize)) as i32
+                } else {
+                    self.resolve_indent(b'\t', line_begin, count)?
+                };
 
                 self.pos = p;
                 self.line_start = line_begin;
-                self.line_indent = count as i32;
-                return Ok(count as i32);
+                self.line_indent = level;
+                return Ok(level);
             }
 
             if first == b'\n' {
@@ -1146,12 +1155,11 @@ fn try_write_inline(out: &mut String, v: &Value<'_>) -> Result<bool, String> {
 }
 
 fn validate_indent_unit(unit: &str) -> Result<(), String> {
-    if unit == "\t"
-        || ((matches!(unit.len(), 2 | 4 | 6 | 8)) && unit.bytes().all(|b| b == b' '))
-    {
+    let b = unit.as_bytes();
+    if !b.is_empty() && (b.iter().all(|&c| c == b' ') || b.iter().all(|&c| c == b'\t')) {
         Ok(())
     } else {
-        Err("indent must be 2, 4, 6, or 8 spaces, or '\\t'".to_string())
+        Err("indent must be a positive number of spaces or tabs".to_string())
     }
 }
 
@@ -1314,7 +1322,7 @@ fn run_tests() -> i32 {
          \"-dash\":\"dash-key\",\"with space\":\"quoted\\nline\\t\\uD83C\\uDF4B\"}",
     ];
 
-    let indents = ["  ", "    ", "      ", "        ", "\t"];
+    let indents = [" ", "  ", "   ", "    ", "     ", "      ", "       ", "        ", "\t", "\t\t"];
     for (idx, jc) in json_cases.iter().enumerate() {
         let v1 = match parse_json(jc) {
             Ok(v) => v,
@@ -1356,11 +1364,13 @@ fn run_tests() -> i32 {
     let invalid_cases = [
         "",
         "   \n",
-        "   bad_indent_3: 1\n",
-        "a:\n bad_indent_1: 1\n",
-        "a:\n     bad_indent_5: 1\n",
-        "a:\n          bad_indent_10: 1\n",
-        "a:\n\t\ttwo_tabs_first: 1\n",
+        "   bad_indent_root: 1\n",
+        "\tbad_indent_root_tab: 1\n",
+        "a:\n    b: 1\n  c: 2\n",
+        "a:\n   b: 1\n     c: 2\n",
+        "a:\n  b:\n      c: 1\n",
+        "a:\n\tb:\n\t\t\tc: 1\n",
+        "a:\n\t\tb: 1\n\tc: 2\n",
         "a:\n  b: 1\n\tc: 2\n",
         "a:\n\tb: 1\n  c: 2\n",
         "a:\n \tb: 1\n",
@@ -1489,15 +1499,19 @@ fn run_bench(path: Option<&str>) -> i32 {
     0
 }
 
-fn parse_indent_arg(s: &str) -> Option<&'static str> {
-    match s {
-        "2" => Some("  "),
-        "4" => Some("    "),
-        "6" => Some("      "),
-        "8" => Some("        "),
-        "tab" | "\\t" | "\t" => Some("\t"),
-        _ => None,
+fn parse_indent_arg(s: &str) -> Option<String> {
+    if s == "tab" || s == "\\t" {
+        return Some("\t".to_string());
     }
+    if validate_indent_unit(s).is_ok() {
+        return Some(s.to_string());
+    }
+    if let Ok(n) = s.parse::<usize>() {
+        if n >= 1 {
+            return Some(" ".repeat(n));
+        }
+    }
+    None
 }
 
 fn usage() -> &'static str {
@@ -1505,7 +1519,7 @@ fn usage() -> &'static str {
      Options:\n\
      \x20 -c, --compact          Output compact single-line JSON\n\
      \x20 -l, --lmon             Output canonical LMON\n\
-     \x20 --indent <2|4|6|8|tab> Set LMON output indentation (default: 4)\n\
+     \x20 --indent <N|tab>       Set LMON output indentation in spaces or tab (default: 4)\n\
      \x20 --from-json            Parse input as JSON and output LMON\n\
      \x20 --check                Validate LMON syntax only\n\
      \x20 --test                 Run conformance test suite\n\
@@ -1529,7 +1543,7 @@ fn main() {
     let mut out_lmon = false;
     let mut from_json = false;
     let mut check_only = false;
-    let mut indent_unit = "    ";
+    let mut indent_unit = "    ".to_string();
     let mut target: Option<&str> = None;
 
     let mut i = 0;
@@ -1540,7 +1554,7 @@ fn main() {
             "--indent" => {
                 i += 1;
                 let Some(val) = args.get(i).and_then(|s| parse_indent_arg(s)) else {
-                    eprintln!("lmon error: --indent must be 2, 4, 6, 8, or tab");
+                    eprintln!("lmon error: --indent must be a positive integer or tab");
                     process::exit(2);
                 };
                 indent_unit = val;
@@ -1607,7 +1621,7 @@ fn main() {
     }
 
     let rendered = if out_lmon {
-        to_lmon_with_indent(&value, indent_unit)
+        to_lmon_with_indent(&value, &indent_unit)
     } else {
         to_json(&value, !compact)
     };

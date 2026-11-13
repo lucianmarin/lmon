@@ -4,7 +4,7 @@
  * Features:
  *   - Flat contiguous value-array DOM (zero pointer-to-pointer indirection)
  *   - Zero-copy string & key slicing with ARM NEON SIMD / fast ASCII scanning
- *   - Auto-detected indentation (2, 4, 6, 8 spaces, or '\t') & universal newlines (\n, \r\n, \r)
+ *   - Auto-detected indentation (any number of spaces or tabs) & universal newlines (\n, \r\n, \r)
  *   - Complete LMON parser, canonical serializer, and RFC 8259 JSON converter
  *   - Embeddable as a library (#define LMON_NO_MAIN before including/compiling)
  *
@@ -12,7 +12,7 @@
  *   cc -O3 -std=c11 -Wall -Wextra lmon.c -o lmon_c
  *   ./lmon_c examples/gateway.lmon
  *   ./lmon_c --compact examples/gateway.lmon
- *   ./lmon_c --lmon [--indent 2|4|6|8|tab] examples/gateway.lmon
+ *   ./lmon_c --lmon [--indent <N|tab>] examples/gateway.lmon
  *   ./lmon_c --from-json input.json
  *   ./lmon_c --check examples/gateway.lmon
  *   ./lmon_c --test
@@ -314,11 +314,18 @@ typedef struct {
     const char *line_start;
     int line_indent;  /* -2 = uncached, -1 = EOF, >= 0 = indent level */
     char indent_char; /* 0 = unlocked, ' ' or '\t' */
-    int indent_width; /* 0 = unlocked, 1, 2, 4, 6, or 8 */
-    int indent_shift; /* 0, 1, 2, 3, or -1 for width 6 */
+    int indent_width; /* 0 = unlocked, >= 1 spaces or tabs per level */
+    int indent_shift; /* >= 0 if indent_width is a power of 2, else -1 */
     LmonArena *arena;
     LmonError *err;
 } LmonParser;
+
+static inline int lmon_pow2_shift(size_t w) {
+    if (w == 0 || (w & (w - 1u)) != 0) return -1;
+    int s = 0;
+    while ((w >> s) > 1u) s++;
+    return s;
+}
 
 static void lmon_set_error(LmonParser *ps, const char *msg, const char *at) {
     if (!ps->err || ps->err->message) return;
@@ -400,38 +407,7 @@ static inline int lmon_peek_line(LmonParser *ps) {
                 return -3;
             }
 
-            size_t count = (size_t)(p - line_begin);
-            int level;
-            if (ps->indent_char == 0) {
-                if (count != 2 && count != 4 && count != 6 && count != 8) {
-                    lmon_set_error(ps, "indentation unit must be 2, 4, 6, or 8 spaces (or 1 tab)", line_begin);
-                    return -3;
-                }
-                ps->indent_char = ' ';
-                ps->indent_width = (int)count;
-                ps->indent_shift = (count == 2) ? 1 : (count == 4) ? 2 : (count == 8) ? 3 : -1;
-                level = 1;
-            } else if (ps->indent_char != ' ') {
-                lmon_set_error(ps, "inconsistent indentation: document uses tabs, got spaces", line_begin);
-                return -3;
-            } else if (ps->indent_shift >= 0) {
-                if ((count & ((size_t)ps->indent_width - 1u)) != 0) {
-                    lmon_set_error(ps, "indentation is not a multiple of detected space width", line_begin);
-                    return -3;
-                }
-                level = (int)(count >> ps->indent_shift);
-            } else {
-                if ((count % 6u) != 0) {
-                    lmon_set_error(ps, "indentation is not a multiple of 6 spaces", line_begin);
-                    return -3;
-                }
-                level = (int)(count / 6u);
-            }
-
-            ps->p = p;
-            ps->line_start = line_begin;
-            ps->line_indent = level;
-            return level;
+            goto have_indent;
         }
 
         if (first == '\t') {
@@ -465,24 +441,7 @@ static inline int lmon_peek_line(LmonParser *ps) {
                 return -3;
             }
 
-            size_t count = (size_t)(p - line_begin);
-            if (ps->indent_char == 0) {
-                if (count != 1) {
-                    lmon_set_error(ps, "first indented block must start at 1 tab", line_begin);
-                    return -3;
-                }
-                ps->indent_char = '\t';
-                ps->indent_width = 1;
-                ps->indent_shift = 0;
-            } else if (ps->indent_char != '\t') {
-                lmon_set_error(ps, "inconsistent indentation: document uses spaces, got tab", line_begin);
-                return -3;
-            }
-
-            ps->p = p;
-            ps->line_start = line_begin;
-            ps->line_indent = (int)count;
-            return (int)count;
+            goto have_indent;
         }
 
         if (first == '\n') {
@@ -498,6 +457,45 @@ static inline int lmon_peek_line(LmonParser *ps) {
         ps->line_start = line_begin;
         ps->line_indent = 0;
         return 0;
+
+    have_indent:;
+        size_t count = (size_t)(p - line_begin);
+        int level;
+        if (ps->indent_char == (char)first) {
+            if (ps->indent_shift >= 0) {
+                if ((count & ((size_t)ps->indent_width - 1u)) != 0) {
+                    lmon_set_error(ps, "indentation is not a multiple of detected indent width", line_begin);
+                    return -3;
+                }
+                level = (int)(count >> ps->indent_shift);
+            } else {
+                size_t w = (size_t)ps->indent_width;
+                size_t q = count / w;
+                if (q * w != count) {
+                    lmon_set_error(ps, "indentation is not a multiple of detected indent width", line_begin);
+                    return -3;
+                }
+                level = (int)q;
+            }
+        } else if (ps->indent_char == 0) {
+            ps->indent_char = (char)first;
+            ps->indent_width = (int)count;
+            ps->indent_shift = lmon_pow2_shift(count);
+            level = 1;
+        } else {
+            lmon_set_error(
+                ps,
+                first == ' ' ? "inconsistent indentation: document uses tabs, got spaces"
+                             : "inconsistent indentation: document uses spaces, got tab",
+                line_begin
+            );
+            return -3;
+        }
+
+        ps->p = p;
+        ps->line_start = line_begin;
+        ps->line_indent = level;
+        return level;
     }
 
     ps->p = p;
@@ -1712,20 +1710,16 @@ static bool lmon_try_write_inline(LmonBuf *b, const LmonValue *v) {
 }
 
 static bool lmon_valid_indent_unit(const char *unit, size_t *out_len) {
-    if (!unit) return false;
-    size_t n = strlen(unit);
-    if (n == 1 && unit[0] == '\t') {
-        *out_len = 1;
-        return true;
+    if (!unit || unit[0] == '\0') return false;
+    char ch = unit[0];
+    if (ch != ' ' && ch != '\t') return false;
+    size_t n = 1;
+    while (unit[n] != '\0') {
+        if (unit[n] != ch) return false;
+        n++;
     }
-    if (n == 2 || n == 4 || n == 6 || n == 8) {
-        for (size_t i = 0; i < n; i++) {
-            if (unit[i] != ' ') return false;
-        }
-        *out_len = n;
-        return true;
-    }
-    return false;
+    *out_len = n;
+    return true;
 }
 
 static void lmon_emit_block(LmonBuf *b, const LmonValue *v, size_t depth, const char *unit, size_t unit_len) {
@@ -1848,7 +1842,7 @@ static int run_tests(void) {
         "\"\":\"empty\",\"true\":\"keyword\",\"false\":false,\"null\":null,\"123\":\"numeric-key\","
         "\"-dash\":\"dash-key\",\"with space\":\"quoted\\nline\\t\\ud83c\\udf4b\"}"
     };
-    const char *indents[] = {"  ", "    ", "      ", "        ", "\t"};
+    const char *indents[] = {" ", "  ", "   ", "    ", "     ", "      ", "       ", "        ", "\t", "\t\t"};
     size_t num_cases = sizeof(json_cases) / sizeof(json_cases[0]);
     size_t num_indents = sizeof(indents) / sizeof(indents[0]);
 
@@ -1909,11 +1903,13 @@ static int run_tests(void) {
     const char *invalid_cases[] = {
         "",
         "   \n",
-        "   bad_indent_3: 1\n",
-        "a:\n bad_indent_1: 1\n",
-        "a:\n     bad_indent_5: 1\n",
-        "a:\n          bad_indent_10: 1\n",
-        "a:\n\t\ttwo_tabs_first: 1\n",
+        "   bad_indent_root: 1\n",
+        "\tbad_indent_root_tab: 1\n",
+        "a:\n    b: 1\n  c: 2\n",
+        "a:\n   b: 1\n     c: 2\n",
+        "a:\n  b:\n      c: 1\n",
+        "a:\n\tb:\n\t\t\tc: 1\n",
+        "a:\n\t\tb: 1\n\tc: 2\n",
         "a:\n  b: 1\n\tc: 2\n",
         "a:\n\tb: 1\n  c: 2\n",
         "a:\n \tb: 1\n",
@@ -2064,12 +2060,18 @@ static int run_bench(const char *path) {
     return 0;
 }
 
-static const char *parse_indent_arg(const char *arg) {
-    if (strcmp(arg, "2") == 0) return "  ";
-    if (strcmp(arg, "4") == 0) return "    ";
-    if (strcmp(arg, "6") == 0) return "      ";
-    if (strcmp(arg, "8") == 0) return "        ";
-    if (strcmp(arg, "tab") == 0 || strcmp(arg, "\\t") == 0 || strcmp(arg, "\t") == 0) return "\t";
+static const char *parse_indent_arg(const char *arg, char *buf, size_t buf_cap) {
+    if (!arg || arg[0] == '\0') return NULL;
+    if (strcmp(arg, "tab") == 0 || strcmp(arg, "\\t") == 0) return "\t";
+    size_t len = 0;
+    if (lmon_valid_indent_unit(arg, &len)) return arg;
+    char *endptr = NULL;
+    unsigned long n = strtoul(arg, &endptr, 10);
+    if (endptr && *endptr == '\0' && n >= 1 && n < buf_cap) {
+        memset(buf, ' ', (size_t)n);
+        buf[n] = '\0';
+        return buf;
+    }
     return NULL;
 }
 
@@ -2079,7 +2081,7 @@ static void print_usage(FILE *out) {
             "Options:\n"
             "  -c, --compact          Output compact single-line JSON\n"
             "  -l, --lmon             Output canonical LMON\n"
-            "  --indent <2|4|6|8|tab> Set LMON output indentation (default: 4)\n"
+            "  --indent <N|tab>       Set LMON output indentation in spaces or tab (default: 4)\n"
             "  --from-json            Parse input as JSON and output LMON\n"
             "  --check                Validate LMON syntax only\n"
             "  --test                 Run conformance test suite\n"
@@ -2104,6 +2106,7 @@ int main(int argc, char **argv) {
     bool out_lmon = false;
     bool from_json = false;
     bool check_only = false;
+    char indent_buf[256];
     const char *indent_unit = "    ";
     const char *target = NULL;
 
@@ -2113,9 +2116,9 @@ int main(int argc, char **argv) {
         else if (strcmp(a, "-l") == 0 || strcmp(a, "--lmon") == 0) out_lmon = true;
         else if (strcmp(a, "--indent") == 0) {
             if (i + 1 >= argc) { print_usage(stderr); return 2; }
-            indent_unit = parse_indent_arg(argv[++i]);
+            indent_unit = parse_indent_arg(argv[++i], indent_buf, sizeof(indent_buf));
             if (!indent_unit) {
-                fprintf(stderr, "lmon error: --indent must be 2, 4, 6, 8, or tab\n");
+                fprintf(stderr, "lmon error: --indent must be a positive integer or tab\n");
                 return 2;
             }
             out_lmon = true;

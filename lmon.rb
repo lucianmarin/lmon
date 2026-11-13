@@ -182,9 +182,6 @@ module LMON
 
           count = p - line_begin
           if @indent_byte.nil?
-            unless count == 2 || count == 4 || count == 6 || count == 8
-              error("indentation unit must be 2, 4, 6, or 8 spaces (or 1 tab)", line_begin)
-            end
             @indent_byte = 0x20
             @indent_width = count
             level = 1
@@ -235,17 +232,22 @@ module LMON
 
           count = p - line_begin
           if @indent_byte.nil?
-            error("first indented block must start at 1 tab", line_begin) if count != 1
             @indent_byte = 0x09
-            @indent_width = 1
+            @indent_width = count
+            level = 1
           elsif @indent_byte != 0x09
             error("inconsistent indentation: document uses spaces, got tab", line_begin)
+          elsif @indent_width == 1
+            level = count
+          else
+            error("indentation must be a multiple of #{@indent_width} tabs", line_begin) if (count % @indent_width) != 0
+            level = count / @indent_width
           end
 
           @sc.pos = p
           @line_start = line_begin
-          @line_indent = count
-          return count
+          @line_indent = level
+          return level
         elsif first == 0x0A
           p += 1
           next
@@ -444,7 +446,7 @@ module LMON
         return parse_block_array(expected_indent - 1, true)
       end
       if indent != expected_indent
-        error("expected indentation level #{expected_indent} (#{expected_indent * 4} spaces), got #{indent * 4} spaces", @line_start)
+        error("expected indentation level #{expected_indent}, got #{indent}", @line_start)
       end
 
       if dash_item?
@@ -603,12 +605,12 @@ module LMON
   end
 
   def normalize_indent(indent)
-    if indent.is_a?(Integer) && [2, 4, 6, 8].include?(indent)
+    if indent.is_a?(Integer) && indent >= 1
       " " * indent
-    elsif indent.is_a?(String) && (indent == "\t" || ([2, 4, 6, 8].include?(indent.bytesize) && indent.delete(" ").empty?))
+    elsif indent.is_a?(String) && !indent.empty? && (indent.delete(" ").empty? || indent.delete("\t").empty?)
       indent
     else
-      raise ArgumentError, "indent must be 2, 4, 6, or 8 (spaces) or '\\t'"
+      raise ArgumentError, "indent must be a positive integer (spaces) or a non-empty string of spaces or tabs"
     end
   end
 
@@ -663,7 +665,7 @@ if __FILE__ == $PROGRAM_NAME
     Options:
       -c, --compact          Output compact single-line JSON
       -l, --lmon             Output canonical LMON
-      --indent <2|4|6|8|tab> Set LMON output indentation (default: 4)
+      --indent <N|tab>       Set LMON output indentation in spaces or tab (default: 4)
       --from-json            Parse input as JSON and output LMON
       --check                Validate LMON syntax only
       --test                 Run conformance test suite
@@ -707,8 +709,9 @@ if __FILE__ == $PROGRAM_NAME
       ]
     ]
 
+    indents = [1, 2, 3, 4, 5, 6, 7, 8, "\t", "\t\t"]
     cases.each do |name, expected|
-      [2, 4, 6, 8, "\t"].each do |ind|
+      indents.each do |ind|
         encoded = LMON.dumps(expected, indent: ind)
         decoded = LMON.loads(encoded)
         if decoded != expected
@@ -731,10 +734,13 @@ if __FILE__ == $PROGRAM_NAME
     invalid = [
       "",
       "   \n",
-      "   bad_indent_3: 1\n",
-      "a:\n bad_indent_1: 1\n",
-      "a:\n     bad_indent_5: 1\n",
-      "a:\n\t\ttwo_tabs_first: 1\n",
+      "   bad_indent_root: 1\n",
+      "\tbad_indent_root_tab: 1\n",
+      "a:\n    b: 1\n  c: 2\n",
+      "a:\n   b: 1\n     c: 2\n",
+      "a:\n  b:\n      c: 1\n",
+      "a:\n\tb:\n\t\t\tc: 1\n",
+      "a:\n\t\tb: 1\n\tc: 2\n",
       "a:\n  b: 1\n\tc: 2\n",
       "a:\n\tb: 1\n  c: 2\n",
       "a:\n \tb: 1\n",
@@ -760,7 +766,7 @@ if __FILE__ == $PROGRAM_NAME
       end
     end
 
-    puts "Ruby LMON: all #{cases.length * 5 + invalid.length + 2} conformance tests passed."
+    puts "Ruby LMON: all #{cases.length * indents.length + invalid.length + 2} conformance tests passed."
     exit 0
   end
 
@@ -780,14 +786,32 @@ if __FILE__ == $PROGRAM_NAME
                end
                LMON.dumps({ "cluster" => "lmon-bench", "count" => 500, "nodes" => nodes })
              end
-    size_kb = sample.bytesize / 1024.0
+    parsed = LMON.loads(sample)
+    sample4 = ARGV[1] ? sample : LMON.dumps(parsed, indent: 4)
+    sample_tab = LMON.dumps(parsed, indent: "\t")
+    lmon4_bytes = sample4.bytesize
+    tab_bytes = sample_tab.bytesize
+    size_kb = lmon4_bytes / 1024.0
     iterations = [10, (10_000 / [1.0, size_kb].max).to_i].max
+    5.times do
+      LMON.loads(sample4)
+      LMON.loads(sample_tab)
+    end
     t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    iterations.times { LMON.loads(sample) }
-    elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
-    mb_s = (sample.bytesize * iterations) / (1024.0 * 1024.0 * elapsed)
-    puts format("Ruby LMON benchmark: %d iterations x %.1f KiB in %.3fs (%.2f MiB/s)",
-                iterations, size_kb, elapsed, mb_s)
+    iterations.times { LMON.loads(sample4) }
+    lmon4_sec = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0
+
+    t_tab = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    iterations.times { LMON.loads(sample_tab) }
+    tab_sec = Process.clock_gettime(Process::CLOCK_MONOTONIC) - t_tab
+
+    lmon4_mbs = (lmon4_bytes * iterations) / (1024.0 * 1024.0 * lmon4_sec)
+    tab_mbs = (tab_bytes * iterations) / (1024.0 * 1024.0 * tab_sec)
+    puts "Ruby LMON benchmark (#{iterations} iterations):"
+    puts format("  LMON (4-space): %.1f KiB/doc -> %.3fs (%.2f MiB/s, %.0f docs/s)",
+                size_kb, lmon4_sec, lmon4_mbs, iterations / lmon4_sec)
+    puts format("  LMON (tab):     %.1f KiB/doc -> %.3fs (%.2f MiB/s, %.0f docs/s)",
+                tab_bytes / 1024.0, tab_sec, tab_mbs, iterations / tab_sec)
     exit 0
   end
 
@@ -807,12 +831,17 @@ if __FILE__ == $PROGRAM_NAME
     when "--indent"
       idx += 1
       val = ARGV[idx]
-      if %w[2 4 6 8].include?(val)
-        indent_opt = val.to_i
-      elsif ["tab", "\\t", "\t"].include?(val)
+      if val.nil?
+        warn usage
+        exit 2
+      elsif ["tab", "\\t"].include?(val)
         indent_opt = "\t"
+      elsif val.match?(/\A[1-9]\d*\z/)
+        indent_opt = val.to_i
+      elsif !val.empty? && (val.delete(" ").empty? || val.delete("\t").empty?)
+        indent_opt = val
       else
-        warn "lmon error: --indent must be 2, 4, 6, 8, or tab"
+        warn "lmon error: --indent must be a positive integer or tab"
         exit 2
       end
       out_lmon = true

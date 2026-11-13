@@ -445,7 +445,7 @@ static PyObject *py_lmon_dumps(PyObject *Py_UNUSED(self), PyObject *args) {
     }
     size_t unit_len = 0;
     if (!lmon_valid_indent_unit(unit, &unit_len)) {
-        PyErr_SetString(PyExc_ValueError, "indent must be 2, 4, 6, or 8 spaces, or '\\t'");
+        PyErr_SetString(PyExc_ValueError, "indent must be a positive integer (spaces) or a non-empty string of spaces or tabs");
         return NULL;
     }
 
@@ -582,12 +582,12 @@ _ext = _load_or_build_extension()
 
 def _normalize_indent(indent: Any) -> str:
     if isinstance(indent, int) and not isinstance(indent, bool):
-        if indent in (2, 4, 6, 8):
+        if indent >= 1:
             return " " * indent
-    elif isinstance(indent, str):
-        if indent == "\t" or (len(indent) in (2, 4, 6, 8) and indent.strip(" ") == ""):
+    elif isinstance(indent, str) and len(indent) >= 1:
+        if indent.strip(" ") == "" or indent.strip("\t") == "":
             return indent
-    raise ValueError("indent must be 2, 4, 6, or 8 (spaces) or '\\t'")
+    raise ValueError("indent must be a positive integer (spaces) or a non-empty string of spaces or tabs")
 
 
 def loads(text: str) -> Any:
@@ -648,8 +648,9 @@ def _run_tests() -> int:
         ),
     ]
 
+    indents = (1, 2, 3, 4, 5, 6, 7, 8, "\t", "\t\t")
     for name, expected in cases:
-        for ind in (2, 4, 6, 8, "\t"):
+        for ind in indents:
             encoded = dumps(expected, indent=ind)
             decoded = loads(encoded)
             if name == "root_big_int":
@@ -672,10 +673,13 @@ def _run_tests() -> int:
     invalid_inputs = [
         "",
         "   \n",
-        "   bad_indent_3: 1\n",
-        "a:\n bad_indent_1: 1\n",
-        "a:\n     bad_indent_5: 1\n",
-        "a:\n\t\ttwo_tabs_first: 1\n",
+        "   bad_indent_root: 1\n",
+        "\tbad_indent_root_tab: 1\n",
+        "a:\n    b: 1\n  c: 2\n",
+        "a:\n   b: 1\n     c: 2\n",
+        "a:\n  b:\n      c: 1\n",
+        "a:\n\tb:\n\t\t\tc: 1\n",
+        "a:\n\t\tb: 1\n\tc: 2\n",
         "a:\n  b: 1\n\tc: 2\n",
         "a:\n\tb: 1\n  c: 2\n",
         "a:\n \tb: 1\n",
@@ -701,7 +705,7 @@ def _run_tests() -> int:
 
     print(
         f"Python C-accelerated LMON (lmon_c.py): all "
-        f"{len(cases) * 5 + len(invalid_inputs) + 2} conformance tests passed."
+        f"{len(cases) * len(indents) + len(invalid_inputs) + 2} conformance tests passed."
     )
     return 0
 
@@ -725,22 +729,31 @@ def _run_bench(path: Optional[str]) -> int:
         sample = dumps({"cluster": "lmon-bench", "count": 500, "nodes": records})
 
     parsed = loads(sample)
+    sample4 = sample if path else dumps(parsed, indent=4)
+    sample_tab = dumps(parsed, indent="\t")
     json_sample = json.dumps(parsed, indent=2) + "\n"
 
-    lmon_bytes = len(sample.encode("utf-8"))
+    lmon_bytes = len(sample4.encode("utf-8"))
+    tab_bytes = len(sample_tab.encode("utf-8"))
     json_bytes = len(json_sample.encode("utf-8"))
     size_kb = lmon_bytes / 1024.0
     iterations = max(50, int(100000 / max(1.0, size_kb)))
 
     # Warmup
     for _ in range(10):
-        loads(sample)
+        loads(sample4)
+        loads(sample_tab)
         json.loads(json_sample)
 
     t0 = time.perf_counter()
     for _ in range(iterations):
-        loads(sample)
+        loads(sample4)
     lmon_sec = time.perf_counter() - t0
+
+    t_tab = time.perf_counter()
+    for _ in range(iterations):
+        loads(sample_tab)
+    tab_sec = time.perf_counter() - t_tab
 
     t1 = time.perf_counter()
     for _ in range(iterations):
@@ -748,20 +761,24 @@ def _run_bench(path: Optional[str]) -> int:
     json_sec = time.perf_counter() - t1
 
     lmon_mbs = (lmon_bytes * iterations) / (1024.0 * 1024.0 * lmon_sec)
+    tab_mbs = (tab_bytes * iterations) / (1024.0 * 1024.0 * tab_sec)
     json_mbs = (json_bytes * iterations) / (1024.0 * 1024.0 * json_sec)
     print(f"Python lmon_c.py vs stdlib json ({iterations} iterations):")
-    print(f"  LMON (lmon_c.py):   {size_kb:.1f} KiB/doc -> {lmon_sec:.3f}s ({iterations/lmon_sec:.1f} docs/s, {lmon_mbs:.1f} MiB/s)")
+    print(f"  LMON (4-space):     {size_kb:.1f} KiB/doc -> {lmon_sec:.3f}s ({iterations/lmon_sec:.1f} docs/s, {lmon_mbs:.1f} MiB/s)")
+    print(f"  LMON (tab):         {tab_bytes/1024.0:.1f} KiB/doc -> {tab_sec:.3f}s ({iterations/tab_sec:.1f} docs/s, {tab_mbs:.1f} MiB/s)")
     print(f"  JSON (stdlib json): {json_bytes/1024.0:.1f} KiB/doc -> {json_sec:.3f}s ({iterations/json_sec:.1f} docs/s, {json_mbs:.1f} MiB/s)")
-    print(f"  Result: lmon_c.py parsed {json_sec/lmon_sec:.2f}x faster per document than Python's built-in C json.loads!")
+    print(f"  Result: lmon_c.py parsed {json_sec/lmon_sec:.2f}x (4-space) / {json_sec/tab_sec:.2f}x (tab) faster per document than Python's built-in C json.loads!")
     return 0
 
 
 def _parse_indent_arg(val: str) -> Any:
-    if val in ("2", "4", "6", "8"):
-        return int(val)
-    if val in ("tab", "\\t", "\t"):
+    if val in ("tab", "\\t"):
         return "\t"
-    raise ValueError("--indent must be 2, 4, 6, 8, or tab")
+    if val.isdigit() and int(val) >= 1:
+        return int(val)
+    if len(val) >= 1 and (val.strip(" ") == "" or val.strip("\t") == ""):
+        return val
+    raise ValueError("--indent must be a positive integer or tab")
 
 
 def _usage() -> str:
@@ -770,7 +787,7 @@ def _usage() -> str:
         "Options:\n"
         "  -c, --compact          Output compact single-line JSON\n"
         "  -l, --lmon             Output canonical LMON\n"
-        "  --indent <2|4|6|8|tab> Set LMON output indentation (default: 4)\n"
+        "  --indent <N|tab>       Set LMON output indentation in spaces or tab (default: 4)\n"
         "  --from-json            Parse input as JSON and output LMON\n"
         "  --check                Validate LMON syntax only\n"
         "  --test                 Run conformance test suite\n"
