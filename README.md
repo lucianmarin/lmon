@@ -7,7 +7,6 @@ LMON is a **strict, lossless 1-to-1 conversion of JSON** with **no curly braces*
 - **Extension:** `.lmon`
 - **Media Type:** `application/lmon`
 - **Encoding:** UTF-8 (without BOM)
-- **Version:** 1.0
 
 ---
 
@@ -85,7 +84,7 @@ upstreams:
 
 ---
 
-## LMON 1.0 Specification
+## LMON Specification
 
 ### 1. Data Model
 
@@ -260,7 +259,7 @@ line_end       = %x0D %x0A | %x0A | %x0D ;  (* Universal newlines: CRLF | LF | C
 
 ## Why LMON Is Fast to Parse
 
-| Property | YAML 1.2 | JSON (RFC 8259) | LMON 1.0 |
+| Property | YAML 1.2 | JSON (RFC 8259) | LMON |
 | :--- | :--- | :--- | :--- |
 | **Indentation scanner** | Arbitrary spaces, chomping/folding states | Arbitrary whitespace skip | **Fixed stride (spaces or tabs, locked once)** |
 | **Object delimiters** | Flow `{}` + block mapping + complex keys | `{`, `}`, `,` on every object/field | **None (newline + indent only)** |
